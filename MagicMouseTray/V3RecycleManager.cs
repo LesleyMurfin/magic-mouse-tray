@@ -4,24 +4,28 @@
 // Mode A (battery readable, scroll broken) to read battery, then restores Mode B.
 //
 // Recycle sequence (all steps synchronous within the loop task):
+//   0. Pre-check: confirm device is in Mode B (IsV3InModeA() == false)
 //   1. Wait for user idle ≥30s (GetLastInputInfo)
 //   2. FLIP:NoFilter  — removes applewirelessmouse from LowerFilters + disable/enable
-//   3. Wait for task completion (poll result.txt, P95=343ms, timeout 30s)
+//   3. Verify Mode A reached: poll HID paths for col02 presence (P95 <500ms, timeout 2s)
 //   4. Read battery via DeviceRegistry.Discover() → first MagicMouseV3 device
 //   5. FLIP:AppleFilter — re-adds filter + disable/enable (Mode B restore)
-//   6. Wait for task completion (P95=370ms, timeout 30s)
+//   6. Verify Mode B restored: poll HID paths, confirm unified path openable (timeout 5s)
+//      mouhid.sys binds asynchronously — exit=0 from MM-Dev-Cycle ≠ mouhid bound.
+//      Up to 3 FLIP:AppleFilter retries if Mode B not confirmed (live fix: 2026-05-06).
 //   7. Raise BatteryRead(pct, name) — TrayApp updates display
 //
 // Failure model:
-//   - Up to 3 retry attempts per cycle (500ms delay between) before marking cycle failed
-//   - Consecutive failure cap: 3 → toast + pause 2h before next attempt
-//   - 24h failure rate: if >10 failures in rolling 24h window → auto-disable + toast
-//   - FLIP:AppleFilter is ALWAYS attempted even if battery read failed (Mode B is the safe state)
+//   - Up to 3 battery-read retry attempts per cycle (500ms delay between)
+//   - FLIP:NoFilter failure → RecordFailure + return immediately (task broken)
+//   - Mode B restore failure → critical toast + RecordFailure + return (unsafe state)
+//   - Consecutive failure cap: 3 → log + reset counter
+//   - 24h failure rate: >10 failures → auto-disable + toast
 //
 // Note: SelfHealManager.OnBatteryObserved sees pct>=0 (split mode) during the recycle window
 // (~8–16s). Because SelfHealManager requires 2 *consecutive* AdaptivePoller poll events showing
 // split before triggering, and the recycle completes within seconds, there is no interference.
-// If FLIP:AppleFilter fails, SelfHealManager provides a fallback restore on the next poll cycle.
+// If Mode B restore fails, SelfHealManager provides a fallback restore on the next poll cycle.
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -31,13 +35,16 @@ internal sealed class V3RecycleManager : IDisposable
 {
     internal event Action<int, string>? BatteryRead;
 
-    static readonly TimeSpan DefaultCadence   = TimeSpan.FromMinutes(15);
+    static readonly TimeSpan DefaultCadence    = TimeSpan.FromMinutes(15);
     static readonly TimeSpan LowBatteryCadence = TimeSpan.FromMinutes(5);   // pct < 20%
-    const int IdleThresholdMs   = 30_000; // 30s
-    const int RetryDelayMs      = 500;
-    const int MaxRetries        = 3;
+    const int IdleThresholdMs    = 30_000; // 30s
+    const int RetryDelayMs       = 500;
+    const int MaxRetries         = 3;
+    const int MaxRestoreAttempts = 3;      // FLIP:AppleFilter retries for Mode B restore
+    const int ModeAVerifyMs      = 2_000;  // poll budget for Mode A confirmation
+    const int ModeBVerifyMs      = 5_000;  // poll budget for Mode B confirmation (mouhid is slow)
     const int ConsecutiveFailCap = 3;
-    const int DailyFailCap      = 10;    // >10 failures in 24h → auto-disable
+    const int DailyFailCap       = 10;    // >10 failures in 24h → auto-disable
 
     CancellationTokenSource _cts = new();
     Task _loop;
@@ -104,6 +111,15 @@ internal sealed class V3RecycleManager : IDisposable
     {
         Logger.Log("V3RECYCLE cycle start");
 
+        // Pre-check: device must be in Mode B before we start.
+        // Mode A at entry means a prior cycle crashed mid-flip — skip and let SelfHealManager restore.
+        bool preCheckModeA = await Task.Run(IsV3InModeA, ct);
+        if (preCheckModeA)
+        {
+            Logger.Log("V3RECYCLE pre-check: device already in Mode A — skip cycle, SelfHealManager will restore");
+            return;
+        }
+
         for (int attempt = 1; attempt <= MaxRetries; attempt++)
         {
             if (ct.IsCancellationRequested) return;
@@ -114,44 +130,61 @@ internal sealed class V3RecycleManager : IDisposable
                 try { await Task.Delay(RetryDelayMs, ct); } catch { return; }
             }
 
-            // Step 1: Flip to Mode A
+            // Step 1: Flip to Mode A (removes LowerFilters, disable/enable PnP device)
             bool flipOk = await Task.Run(
                 () => SelfHealRequest.SubmitFlipAndWait(FlipPhase.NoFilter, 30_000), ct);
 
             if (!flipOk)
             {
                 Logger.Log($"V3RECYCLE FLIP:NoFilter failed attempt={attempt}");
-                // Don't retry flips — if the task is broken, retries won't help
+                // Task failure is not transient — retrying won't help
                 RecordFailure("FLIP:NoFilter failed");
                 return;
             }
 
-            // Step 2: Read battery — DeviceRegistry now shows split v3 (COL02 present)
+            // Step 2: Verify Mode A reached (col02 collection visible in HID paths)
+            // mouhid releases the device during disable/enable — poll until col02 appears
+            bool modeAReached = await Task.Run(() => WaitForModeA(ModeAVerifyMs), ct);
+            Logger.Log($"V3RECYCLE mode_a_reached={modeAReached} attempt={attempt}");
+
+            // Step 3: Read battery (only if Mode A confirmed — col02 must be present)
             string deviceName = string.Empty;
             int pct = -1;
 
-            var devices = DeviceRegistry.Discover();
-            var v3 = devices.FirstOrDefault(d => d.Kind == DeviceKind.MagicMouseV3);
-
-            if (v3 is not null)
+            if (modeAReached)
             {
-                deviceName = v3.DeviceName;
-                pct = v3.GetBatteryPercent();
-                Logger.Log($"V3RECYCLE battery read: device={deviceName} pct={pct} attempt={attempt}");
+                var devices = DeviceRegistry.Discover();
+                var v3 = devices.FirstOrDefault(d => d.Kind == DeviceKind.MagicMouseV3);
+
+                if (v3 is not null)
+                {
+                    deviceName = v3.DeviceName;
+                    pct = v3.GetBatteryPercent();
+                    Logger.Log($"V3RECYCLE battery read: device={deviceName} pct={pct} attempt={attempt}");
+                }
+                else
+                {
+                    Logger.Log($"V3RECYCLE COL02 not found in DeviceRegistry attempt={attempt}");
+                }
             }
-            else
+
+            // Step 4: ALWAYS restore Mode B — Mode B is the safe state.
+            // FLIP:AppleFilter exit=0 does NOT guarantee mouhid.sys has rebound (async).
+            // RestoreModeBWithRetry retries FLIP:AppleFilter and verifies with HID path polling.
+            bool restored = await Task.Run(RestoreModeBWithRetry, ct);
+
+            if (!restored)
             {
-                Logger.Log($"V3RECYCLE COL02 not found in DeviceRegistry attempt={attempt}");
+                Logger.Log("V3RECYCLE CRITICAL: Mode B restore failed after all retries — mouhid may not be bound");
+                ToastNotifier.ShowError("Magic Mouse Battery",
+                    "Mouse scroll may be broken. Unplug/replug cable or toggle Battery Reads in menu.");
+                RecordFailure("Mode B restore failed");
+                return; // Do NOT retry battery read — device state is unknown
             }
 
-            // Step 3: ALWAYS restore Mode B — Mode B is the safe state
-            bool restoreOk = await Task.Run(
-                () => SelfHealRequest.SubmitFlipAndWait(FlipPhase.AppleFilter, 30_000), ct);
+            Logger.Log("V3RECYCLE Mode B confirmed restored");
 
-            if (!restoreOk)
-                Logger.Log("V3RECYCLE FLIP:AppleFilter failed — SelfHealManager will restore on next poll");
-
-            // Step 4: Evaluate result
+            // Step 5: Evaluate result
             if (pct >= 0)
             {
                 _lastKnownPct = pct;
@@ -161,12 +194,97 @@ internal sealed class V3RecycleManager : IDisposable
                 return;
             }
 
-            // Battery read failed — retry if we have attempts left
+            // Battery read failed but Mode B is intact — retry the full cycle
         }
 
-        // All retries exhausted
+        // All retries exhausted with successful Mode B restores each time
         RecordFailure("all retries exhausted");
     }
+
+    // Attempts FLIP:AppleFilter up to MaxRestoreAttempts times, verifying Mode B after each.
+    // mouhid.sys binds asynchronously — WaitForModeB polls until the unified path is accessible.
+    bool RestoreModeBWithRetry()
+    {
+        for (int i = 1; i <= MaxRestoreAttempts; i++)
+        {
+            if (i > 1)
+            {
+                Logger.Log($"V3RECYCLE FLIP:AppleFilter retry {i}/{MaxRestoreAttempts} — Mode B not yet confirmed");
+                Thread.Sleep(500);
+            }
+
+            bool flipOk = SelfHealRequest.SubmitFlipAndWait(FlipPhase.AppleFilter, 30_000);
+            Logger.Log($"V3RECYCLE FLIP:AppleFilter attempt={i} ok={flipOk}");
+
+            if (WaitForModeB(ModeBVerifyMs))
+                return true;
+
+            Logger.Log($"V3RECYCLE Mode B not confirmed after FLIP:AppleFilter attempt={i}/{MaxRestoreAttempts}");
+        }
+
+        return false;
+    }
+
+    // Polls until a v3 col02 path appears (Mode A / split descriptor active).
+    // Returns true if Mode A confirmed within timeoutMs.
+    static bool WaitForModeA(int timeoutMs)
+    {
+        var deadline = Environment.TickCount64 + timeoutMs;
+        do
+        {
+            if (IsV3InModeA()) return true;
+            Thread.Sleep(100);
+        } while (Environment.TickCount64 < deadline);
+        return false;
+    }
+
+    // Polls until the v3 unified path appears (no col0x) and is openable (mouhid bound, Mode B).
+    // Returns true if Mode B confirmed within timeoutMs.
+    static bool WaitForModeB(int timeoutMs)
+    {
+        var deadline = Environment.TickCount64 + timeoutMs;
+        do
+        {
+            if (IsV3InModeB()) return true;
+            Thread.Sleep(100);
+        } while (Environment.TickCount64 < deadline);
+        return false;
+    }
+
+    // True if any HID path is a v3 Magic Mouse in Mode A (col02 collection present in path).
+    static bool IsV3InModeA() =>
+        HidNative.EnumerateHidPaths().Any(p =>
+            IsV3Path(p) &&
+            p.Contains("col02", StringComparison.OrdinalIgnoreCase));
+
+    // True if a v3 Magic Mouse unified path exists (no split collections) and is accessible.
+    // Accessibility via CreateFile(0 access) confirms mouhid.sys has finished binding.
+    static bool IsV3InModeB()
+    {
+        var v3Paths = HidNative.EnumerateHidPaths()
+            .Where(IsV3Path)
+            .ToList();
+
+        if (v3Paths.Count == 0) return false;
+
+        // In Mode B all v3 HID paths are unified — no &col0x collection suffixes
+        if (v3Paths.Any(p => p.Contains("&col0", StringComparison.OrdinalIgnoreCase)))
+            return false;
+
+        // Confirm mouhid has bound by verifying the unified path is openable
+        var unifiedPath = v3Paths[0];
+        using var h = HidNative.CreateFile(unifiedPath, 0,
+            HidNative.FILE_SHARE_READ | HidNative.FILE_SHARE_WRITE,
+            IntPtr.Zero, HidNative.OPEN_EXISTING, 0, IntPtr.Zero);
+        return !h.IsInvalid;
+    }
+
+    // True if the HID device path belongs to a Magic Mouse v3 (BT or USB).
+    static bool IsV3Path(string path) =>
+        (path.Contains("0001004c", StringComparison.OrdinalIgnoreCase) &&
+         path.Contains("pid&0323", StringComparison.OrdinalIgnoreCase)) ||
+        (path.Contains("vid_05ac", StringComparison.OrdinalIgnoreCase) &&
+         path.Contains("pid_0323", StringComparison.OrdinalIgnoreCase));
 
     void RecordFailure(string reason)
     {
@@ -182,8 +300,7 @@ internal sealed class V3RecycleManager : IDisposable
 
         if (_consecutiveFailures >= ConsecutiveFailCap)
         {
-            Logger.Log($"V3RECYCLE {ConsecutiveFailCap} consecutive failures — pausing 2h");
-            // Don't auto-disable for consecutive failures; just slow down. Auto-disable only for daily cap.
+            Logger.Log($"V3RECYCLE {ConsecutiveFailCap} consecutive failures — pausing until next cadence interval");
             _consecutiveFailures = 0; // reset so next successful cycle clears the count
         }
 
