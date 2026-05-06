@@ -9,6 +9,49 @@ MagicMouseFix cert. Staged to `C:\Windows\System32\drivers\applewirelessmouse.sy
 
 ---
 
+## Reconciliation — 2026-05-06 (Session 16)
+
+The Session 16 Ghidra trace (`docs/SESSION-16-GHIDRA-DESCRIPTOR-TRACE.md`, MD5-verified static
+disassembly of WHQL stock `applewirelessmouse.sys` `f4ae407c…ed5f20`) confirms this patch
+**targeted the correct bytes**. Verdict from Session 16: **PATCH-VIABLE in place at file `0xA850`,
+116-byte ceiling**. This supersedes the same-day Session 15 morning BLUF that briefly listed
+PATH-A as "invalidated" on a "zero references" finding (the search missed SSE-encoded
+RIP-relative loads — see PSN-0001 H-019 and the Session 15 evening retraction).
+
+What was right:
+- File offset `0xA850` IS the canonical source. Apple's filter copies these 116 bytes verbatim
+  from two write paths in the SDP-completion callback (F3 at VA `0x14000a440`, file ranges
+  `0x9611` and `0x96e5`). Both paths emit the same 116 bytes; differences between them are SDP
+  DataElement length-encoding paths, not descriptor variants.
+- In-place modification within the existing 116-byte slot does NOT require updating any
+  RIP-relative offsets — the 16 `movups xmm, [rip+disp]` + 1 `mov eax, [rip+disp]` references
+  remain valid because both source bytes and loading instructions stay at their original
+  addresses.
+
+What went wrong (re-attribution of the runtime failure):
+- The runtime failure (NTSTATUS `0xC00000B9` `STATUS_INVALID_PARAMETER_MIX`, then Problem Code
+  22 in Session 15 retry) was NOT a source-location error. The most likely contributors are:
+  1. **Descriptor design infeasibility within 116 bytes**: the patched 2-TLC layout (Mouse TLC1
+     ~81 bytes + Vendor Battery TLC2 ~35 bytes) forced compromises (the 5→2 button reduction
+     was itself a Session 15 transcription error per the Session 16 correction; the actual
+     loss was the vendor 1-bit pad TLC + the phantom Feature 0x47, plus restructure into 2
+     TLCs) that broke compiled-in assumptions in Apple's gesture engine in the same binary.
+  2. **Cert chain runtime trust**: `signtool` re-sign truncated the cert overlay (78424 → 66288
+     bytes); Microsoft Code Integrity rejected the self-signed `MagicMouseFix` cert chain on
+     Windows 11 24H2 (build 26100) without testsigning enabled or the cert installed into
+     `LocalMachine\TrustedPublisher` (per cross-session memory M12 Driver Cert Pattern).
+  3. **BTHPORT cache mismatch**: HidBth's kernel-pool cache is the authoritative descriptor
+     source for already-paired devices; clearing it forces a fresh SDP exchange that Apple's
+     filter intercepts. If cache is not cleared, the patched filter is bypassed.
+
+**Conclusion**: PATH-A in-place patch mechanics are sound. The descriptor design space within
+116 bytes that satisfies BOTH (a) `hidclass.sys` parser rules AND (b) Apple's gesture engine's
+compiled layout assumptions is the open problem. PATH-B (M13/M14 KMDF clean-room driver) is the
+production path; PATH-A remains formally viable but feasibility-constrained pending the
+PATH-A design pass referenced in the recent PRD-PATH-B M0 milestone.
+
+---
+
 ## Background
 
 Track 1 (confirmed 2026-04-29): Battery reads at cold boot via Apple stock filter. COL02
