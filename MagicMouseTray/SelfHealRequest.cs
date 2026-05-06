@@ -20,8 +20,11 @@
 
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 
 namespace MagicMouseTray;
+
+internal enum FlipPhase { NoFilter, AppleFilter }
 
 internal static class SelfHealRequest
 {
@@ -33,14 +36,62 @@ internal static class SelfHealRequest
     // Phase that triggers a no-op LowerFilters mutation + a forced disable+enable.
     // mm-state-flip.ps1 detects "already in target state" but still runs the
     // recycle, which is exactly what we want.
-    const string Phase = "FLIP:AppleFilter";
+    const string PhaseAppleFilter = "FLIP:AppleFilter";
+
+    // Phase that removes applewirelessmouse from LowerFilters → Mode A (COL02 present).
+    // PATH-B: used to expose COL02 for battery read. Requires FLIP:AppleFilter after.
+    const string PhaseNoFilter = "FLIP:NoFilter";
 
     /// <summary>
-    /// Submits a recycle request via the MM-Dev-Cycle queue + triggers the task.
-    /// Returns true if the queue was written + task triggered. Does NOT wait for
-    /// completion — caller polls result.txt or waits for next BatteryChanged.
+    /// Submits FLIP:AppleFilter (Mode B restore). Fire-and-forget — does not wait for completion.
+    /// Backward-compat wrapper for SelfHealManager.
     /// </summary>
     internal static bool RequestRecycle()
+        => TriggerFlip(PhaseAppleFilter);
+
+    /// <summary>
+    /// Submits a flip phase and waits for the MM-Dev-Cycle task to report completion.
+    /// Polls result.txt for up to timeoutMs. Returns true if task completed with exit 0.
+    /// Used by V3RecycleManager for synchronous flip-and-wait sequencing.
+    /// </summary>
+    internal static bool SubmitFlipAndWait(FlipPhase phase, int timeoutMs = 30_000)
+    {
+        var phaseStr = phase == FlipPhase.NoFilter ? PhaseNoFilter : PhaseAppleFilter;
+        var nonce = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString();
+
+        if (!WriteRequest(phaseStr, nonce)) return false;
+        if (!StartTask(phaseStr)) return false;
+
+        // Poll result.txt for EXITCODE|NONCE match
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        while (DateTime.UtcNow < deadline)
+        {
+            Thread.Sleep(100);
+            try
+            {
+                if (!File.Exists(ResultFile)) continue;
+                var raw = File.ReadAllText(ResultFile).Trim();
+                if (!raw.EndsWith($"|{nonce}")) continue;
+
+                var exitCode = int.TryParse(raw.Split('|', 2)[0], out var rc) ? rc : -1;
+                Logger.Log($"FLIP phase={phaseStr} exitCode={exitCode} nonce={nonce}");
+                return exitCode == 0;
+            }
+            catch { }
+        }
+
+        Logger.Log($"FLIP timeout phase={phaseStr} nonce={nonce} after {timeoutMs}ms");
+        return false;
+    }
+
+    static bool TriggerFlip(string phase)
+    {
+        var nonce = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString();
+        if (!WriteRequest(phase, nonce)) return false;
+        return StartTask(phase);
+    }
+
+    static bool WriteRequest(string phase, string nonce)
     {
         try
         {
@@ -49,13 +100,21 @@ internal static class SelfHealRequest
                 Logger.Log($"SELFHEAL queue dir missing at {QueueDir} — task not installed?");
                 return false;
             }
+            File.WriteAllText(RequestFile, $"{phase}|{nonce}");
+            Logger.Log($"FLIP queued: phase={phase} nonce={nonce}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"FLIP write exception: {ex.Message}");
+            return false;
+        }
+    }
 
-            var nonce = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString();
-            File.WriteAllText(RequestFile, $"{Phase}|{nonce}");
-            Logger.Log($"SELFHEAL request queued: phase={Phase} nonce={nonce}");
-
-            // Trigger via schtasks.exe /run — non-elevated invocation works because
-            // the task has Principal RunLevel=HighestAvailable.
+    static bool StartTask(string phase)
+    {
+        try
+        {
             var psi = new ProcessStartInfo
             {
                 FileName = "schtasks.exe",
@@ -65,27 +124,15 @@ internal static class SelfHealRequest
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
-
             using var p = Process.Start(psi);
-            if (p is null)
-            {
-                Logger.Log("SELFHEAL Process.Start returned null");
-                return false;
-            }
-
-            // Don't block the poll thread — fire and forget; the task runs async.
+            if (p is null) { Logger.Log("SELFHEAL Process.Start returned null"); return false; }
             p.WaitForExit(5000);
-            if (p.ExitCode != 0)
-            {
-                Logger.Log($"SELFHEAL schtasks.exe exit={p.ExitCode}");
-                return false;
-            }
-
+            if (p.ExitCode != 0) { Logger.Log($"SELFHEAL schtasks.exe exit={p.ExitCode}"); return false; }
             return true;
         }
         catch (Exception ex)
         {
-            Logger.Log($"SELFHEAL request exception: {ex.Message}");
+            Logger.Log($"SELFHEAL start exception: {ex.Message}");
             return false;
         }
     }

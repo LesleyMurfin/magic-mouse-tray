@@ -29,6 +29,7 @@ internal sealed class TrayApp : IDisposable
     CriticalAlert? _criticalAlert;
 
     readonly DriverStatus _driverStatus;
+    readonly V3RecycleManager _recycleManager;
 
     Icon? _currentIcon;
 
@@ -56,6 +57,9 @@ internal sealed class TrayApp : IDisposable
         _poller = new AdaptivePoller();
         _poller.BatteryChanged += OnBatteryChanged;
         _poller.Start();
+
+        _recycleManager = new V3RecycleManager(_config);
+        _recycleManager.BatteryRead += OnBatteryChanged;
     }
 
     ContextMenuStrip BuildMenu(
@@ -115,6 +119,20 @@ internal sealed class TrayApp : IDisposable
             menu.Items.Add(driverItem);
             menu.Items.Add(new ToolStripSeparator());
         }
+
+        // --- Battery Reads toggle (PATH-B v3 recycle on/off) ---
+        var battReadItem = new ToolStripMenuItem("Battery Reads [On]")
+        {
+            Checked = _config.EnableV3Recycle
+        };
+        battReadItem.Click += (_, _) =>
+        {
+            _config.SetEnableV3Recycle(!_config.EnableV3Recycle);
+            battReadItem.Text = _config.EnableV3Recycle ? "Battery Reads [On]" : "Battery Reads [Off]";
+            battReadItem.Checked = _config.EnableV3Recycle;
+            if (_config.EnableV3Recycle) _recycleManager.ReEnable();
+        };
+        menu.Items.Add(battReadItem);
 
         // --- Refresh Now ---
         var refresh = new ToolStripMenuItem("Refresh Now");
@@ -260,6 +278,8 @@ internal sealed class TrayApp : IDisposable
 
     public void Dispose()
     {
+        _recycleManager.BatteryRead -= OnBatteryChanged;
+        _recycleManager.Dispose();
         _poller.BatteryChanged -= OnBatteryChanged;
         _poller.Dispose();
         _criticalAlert?.Close();

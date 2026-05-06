@@ -43,6 +43,26 @@ internal static class ToastNotifier
         }
     }
 
+    internal static void ShowError(string title, string message)
+    {
+        try
+        {
+            EnsureAumid();
+            var doc = new XmlDocument();
+            doc.LoadXml($"""
+                <toast>
+                    <visual><binding template="ToastGeneric">
+                        <text>{title}</text>
+                        <text>{message}</text>
+                    </binding></visual>
+                </toast>
+                """);
+            ToastNotificationManager.CreateToastNotifier(Aumid).Show(new ToastNotification(doc));
+            Logger.Log($"TOAST_ERROR title={title}");
+        }
+        catch (Exception ex) { Logger.Log($"TOAST_FAILED err={ex.Message}"); }
+    }
+
     // Writes DisplayName under HKCU\SOFTWARE\Classes\AppUserModelId\<Aumid> so Windows
     // attributes the toast to "Magic Mouse Battery" rather than an anonymous app.
     static void EnsureAumid()
