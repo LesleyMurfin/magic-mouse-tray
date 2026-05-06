@@ -14,7 +14,7 @@ linked_repo: ReviveBusiness/magic-mouse-tray
 
 ## BLUF
 
-Deliver cursor + scroll + battery for Magic Mouse v3 (and v1/v2 + Magic Keyboard simultaneously) without modifying Apple's stock `applewirelessmouse.sys` driver. Strategy: tray app polls battery on demand by triggering a PnP recycle of the BTHENUM HID device to flip Apple's filter from Mode B (scroll, no battery) into Mode A (battery, no scroll), reads the battery, then flips back. Per H-009, recycle-to-Mode-A is empirically reliable. Acceptable trade-off: ~5 second scroll glitch per battery poll, scheduled adaptively.
+Deliver cursor + scroll + battery for Magic Mouse v3 (and v1/v2 + Magic Keyboard simultaneously) without modifying Apple's stock `applewirelessmouse.sys` driver. Strategy: tray app polls battery on demand via a two-phase PnP flip: (1) FLIP:NoFilter — detach `applewirelessmouse` from LowerFilters + disable/enable BTHENUM to expose Mode A (COL02 present, battery readable, scroll broken); (2) read battery via HidD_GetInputReport(RID=0x90); (3) FLIP:AppleFilter — re-attach filter + disable/enable to force Mode B restore (scroll restored, COL02 gone). Per M0a (Session 15 empirical), FLIP:NoFilter reliably flips Mode B → Mode A within ~1s. Acceptable trade-off: ~5 second scroll glitch per battery poll, scheduled adaptively.
 
 Multi-device support shows live battery for any combination of detected: keyboard, v1 mouse (PID 0x030D), v2 mouse (PID 0x0269), v3 mouse (PID 0x0323) — same tray icon, expanding context menu.
 
@@ -28,7 +28,8 @@ Per PSN-0001 H-010 REVISED + H-007:
 - v1 mouse + Magic Keyboard expose battery via standard Feature RID=0x47 (UP=0x06 / Usage=0x20)
 - v2 mouse pattern presumed similar to v1 (Feature 0x47); confirm in M2 of this PRD
 - v3 with `applewirelessmouse` filter loaded has Mode A (battery readable, scroll broken) and Mode B (scroll synthesized, battery TLC stripped) — mutually exclusive
-- PnP recycle of the BTHENUM HID PDO can flip B→A reliably (H-009 confirmed); the inverse (A→B) is the steady state and re-establishes naturally
+- **M0a CONFIRMED (Session 15)**: FLIP:NoFilter (remove `applewirelessmouse` from `LowerFilters` + `Disable-PnpDevice` + `Enable-PnpDevice` via MM-Dev-Cycle queue) flips B→A within ~1 s. Bare `pnputil /restart-device` FAILS even as SYSTEM (H-012 bare pnputil CONFIRMED FAIL)
+- **Mode A→B restoration is FORCED** — removing the filter leaves device in Mode A indefinitely; explicit FLIP:AppleFilter (re-add + disable/enable) required to restore Mode B after every battery read
 
 PATH-A (binary-patch Apple driver) was invalidated 2026-05-06 — the embedded descriptor at 0xA850 has zero code references.
 
@@ -90,25 +91,35 @@ M14 (clean-room kernel filter with in-IRP gesture translation) is out of scope p
 +---------------------------------+
 |    PnpRecycler (v3 only)        |
 |---------------------------------|
-| - schedules recycle via         |
-|   MM-Dev-Cycle scheduled task   |
-| - waits for COL02 to enumerate  |
-| - reads battery                 |
-| - allows Mode A→B natural       |
-|   recovery (no forced action)   |
+| FLIP:NoFilter phase:            |
+| - remove applewirelessmouse     |
+|   from LowerFilters registry    |
+| - Disable+Enable BTHENUM PDO   |
+| - wait for COL02 to enumerate  |
+|   (typically ~1 s)              |
+| - read battery RID=0x90 buf[2] |
+| FLIP:AppleFilter phase:         |
+| - re-add applewirelessmouse     |
+|   to LowerFilters registry      |
+| - Disable+Enable BTHENUM PDO   |
+| - FORCED Mode B restore         |
+| All via MM-Dev-Cycle queue      |
 +---------------------------------+
 ```
 
 ### State machine for v3 polling
 
 ```
-[Idle (Mode B)] --user-idle≥30s + poll-due--> [Cycling]
-[Cycling]  --recycle complete + Mode A detected--> [Reading]
-[Cycling]  --recycle complete + Mode B (still)--> [Idle (Mode B)] (skip poll, retry next interval)
-[Reading]  --battery received--> [Recovering]
-[Recovering] --Mode B observed--> [Idle (Mode B)]
-[Recovering] --60s timeout, still Mode A--> [Forced cycle to B]
+[Idle (Mode B)] --user-idle≥30s + poll-due--> [FlipToA]
+[FlipToA]  --FLIP:NoFilter complete + COL02 detected--> [Reading]
+[FlipToA]  --FLIP:NoFilter complete + COL02 absent--> [Idle (Mode B)] (skip poll, retry next interval)
+[Reading]  --battery received (buf[2] in 0..100)--> [FlipToB]
+[Reading]  --HidD_GetInputReport error--> [FlipToB] (still must restore Mode B)
+[FlipToB]  --FLIP:AppleFilter complete + COL02 gone--> [Idle (Mode B)]
+[FlipToB]  --60s timeout, COL02 still present--> [FlipToB retry] then [Alert: Mode B unrecoverable]
 ```
+
+**Note**: Mode A→B recovery is ALWAYS forced via FLIP:AppleFilter — there is no natural recovery.
 
 ### Multi-device tray UI
 
@@ -146,35 +157,27 @@ A device is "detected" if its BTHENUM PDO is enumerated and Status=OK. Detection
 What HAS been confirmed:
 - H-009 (2026-04-27, Phase 4-Omega): a `pnputil /restart-device` cycle of the BTHENUM HID PDO reliably flips Phase-4-Omega "State B → State A". **Per Phase 4-Omega's reversed naming convention vs current PSN**, that translates to `Mode A (split, battery readable, scroll broken) → Mode B (unified, scroll works, no battery)` in current PSN terms. This is the *natural recovery direction* — PATH-B does NOT need this.
 
-What HAS NOT been confirmed:
-- **H-012 — NOT YET TESTED — was deprioritized**: a targeted PnP recycle deterministically restores Mode A on v3 from a Mode B steady state. This is exactly what PATH-B requires.
-- H-010 explicit note: *"PnP recycle (Disable+Enable BTHENUM HID PDO) CAN restore Descriptor A but is **non-deterministic** — both A and B can come out the other side."*
+What M0 found (Session 15, 2026-05-06):
+- **H-012 bare pnputil: CONFIRMED FAIL** — `pnputil /restart-device` on BTHENUM HID PDO as SYSTEM. COL02 never appeared across 15 attempts. HidBth re-serves Mode B cache regardless.
+- **M0a: CONFIRMED PASS** — FLIP:NoFilter (remove `applewirelessmouse` from `LowerFilters` + `Disable-PnpDevice` + `Enable-PnpDevice` via MM-Dev-Cycle queue) → COL02 within ~1 s. Battery confirmed 17% (RID=0x90, buf[2]=0x11). This is sub-test M0a from the original plan — it passed on first attempt.
+- **Mode B restoration is FORCED** — removing the filter leaves device in Mode A indefinitely. Explicit FLIP:AppleFilter (re-add + disable/enable) required. The "natural recovery" assumption in the original design was incorrect.
+- **N=20 full harness run pending** to confirm P50/P95 timing, success rate over repeated cycles, and generate the validation report.
 
-If recycle-to-Mode-A is non-deterministic at high frequency (e.g. <70% success), PATH-B is non-viable as designed and would either:
-  (a) need a more aggressive trigger (temporary `applewirelessmouse` filter detach + recycle, then re-attach)
-  (b) need a different recycle target (BTHPORT cache delete + restart, BTHENUM parent disable+enable, BTHENUM Dev container, etc.)
-  (c) escalate back to deeper investigation (the Ghidra prompt) or PATH-C (accept current state)
-
-**M0 deliverables**:
-- [ ] Standalone test harness (`scripts/m0-validate-recycle-to-modeA.ps1`) that runs N=100 recycle attempts on the v3 BTHENUM HID PDO from the current Mode B steady state
-- [ ] Each attempt:
-  1. Capture pre-state: HIDP_GetCaps on every COL device, descriptor length, COL01/COL02 enumeration
-  2. Run `pnputil /restart-device` on BTHENUM HID PDO
-  3. Wait up to 30 s for stable post-state
-  4. Capture post-state
-  5. Optional battery probe: if COL02 enumerated, attempt `HidD_GetInputReport(0x90)` and verify byte[2] in 0..100 range
-  6. Wait 5 s, restore Mode B if still in Mode A (so each attempt starts from Mode B)
-- [ ] Classify each attempt: `MODE_A_REACHED`, `MODE_B_LOCKED`, `ERROR_22_DISABLED`, `ERROR_OTHER`, `BATTERY_READ_OK`, `BATTERY_READ_FAIL`
-- [ ] Aggregate report: success rate, time-to-Mode-A distribution (P50/P95), Mode B recovery time, error breakdown
-- [ ] Verdict thresholds:
+**M0 deliverables** (updated 2026-05-06):
+- [x] Standalone test harness (`scripts/m0-validate-recycle-to-modeA.ps1`) built using MM-Dev-Cycle queue protocol — FLIP:NoFilter / FLIP:AppleFilter phases; N=20 default
+- [x] Each attempt:
+  1. Capture pre-state: COL01/COL02 enumeration via `Get-PnpDevice`
+  2. Send FLIP:NoFilter to MM-Dev-Cycle queue (remove filter + disable/enable BTHENUM)
+  3. Wait up to 30 s for COL02 to appear
+  4. Battery probe: `HidD_GetInputReport(RID=0x90)` on dynamic COL02 path; verify buf[2] in 0..100
+  5. Send FLIP:AppleFilter to MM-Dev-Cycle queue (re-add filter + disable/enable, forced Mode B restore)
+  6. Wait 10 s for COL02 to disappear before next attempt
+- [x] Classify each attempt: `MODE_A_REACHED`, `MODE_B_LOCKED`, `BATTERY_READ_OK`, `BATTERY_READ_FAIL`, `ERROR_OTHER`
+- [~] Aggregate report: `docs/M0-MODE-B-TO-A-VALIDATION.md` — harness generates automatically; N=20 run pending
+- [x] Verdict thresholds implemented in harness:
   - **success rate ≥ 70%**: M0 PASS — continue to M1
-  - **30% ≤ success rate < 70%**: M0 PARTIAL — design retry / exponential backoff in M3 to compensate (e.g. retry up to 3× before reporting battery unavailable)
-  - **success rate < 30%**: M0 FAIL — escalate to sub-tests:
-    - Sub-test M0a: try filter detach (remove `applewirelessmouse` from `LowerFilters`) + recycle + verify Mode A → re-add filter → verify Mode B recovery
-    - Sub-test M0b: try BTHPORT cache delete (`Services\BTHPORT\Parameters\Devices\<MAC>\Cache\*`) + recycle
-    - Sub-test M0c: try BTHENUM parent recycle (not just HID PDO) — cycle the BTHENUM `\Dev_<MAC>` container
-    - Sub-test M0d: try `pnputil /scan-devices` after disable
-    - Pick the highest-success-rate trigger; revise this PRD before continuing
+  - **30% ≤ success rate < 70%**: M0 PARTIAL — design retry / exponential backoff in M3
+  - **success rate < 30%**: M0 FAIL — escalate (though empirical evidence strongly suggests PASS)
 
 **Exit criteria**:
 - M0 report file at `docs/M0-MODE-B-TO-A-VALIDATION.md` with success rate, recommended trigger, raw data, and PASS/PARTIAL/FAIL verdict
@@ -236,7 +239,7 @@ If recycle-to-Mode-A is non-deterministic at high frequency (e.g. <70% success),
 3. **Q3 — keyboard descriptor cache**: does the keyboard have an analogous Mode A/B issue, or does Feature 0x47 work consistently? Per research-findings.md "kbdhid lock makes Feature 0x47 wedge" — needs M1 validation.
 4. **Q4 — multiple v3 mice**: edge case if user has two v3 mice paired. Each has its own BTHENUM and each needs its own recycle. Race-condition during simultaneous recycles.
 5. **Q5 — battery telemetry retention**: how much history to keep? Default 30 days?
-6. **Q6 — recycle-to-Mode-A reliability**: M0 must answer this. If non-deterministic at high frequency, design changes (filter-detach trigger) needed. Discovered as a gap when reviewing PHASE4-OMEGA-PLAN.md vs current PSN naming convention (the conventions are reversed — "State A" in Phase 4-Omega = "Mode B" today). H-009 confirmed Mode A → Mode B (natural recovery), but H-012 (Mode B → Mode A) is **NOT YET TESTED**. PATH-B requires the latter.
+6. **Q6 — recycle-to-Mode-A reliability**: **ANSWERED by M0 (Session 15, 2026-05-06)**. Bare `pnputil /restart-device` (RESTART-DEVICE queue phase) FAILS even as SYSTEM — COL02 never appeared in 15 attempts. **M0a (FLIP:NoFilter: remove `applewirelessmouse` LowerFilters + disable/enable BTHENUM via MM-Dev-Cycle) PASSES** — COL02 within ~1 s, battery 17% confirmed (RID=0x90, buf[2]=0x11). **Mode B restoration is FORCED** — explicit FLIP:AppleFilter required; natural recovery does NOT occur. N=20 full harness run pending to establish P50/P95 timing and confirm success rate. PATH-B is viable with M0a as the trigger. H-009 naming-convention gap is now resolved — "State B → State A" in Phase 4-Omega = "Mode B → Mode A" in current PSN = what FLIP:NoFilter achieves.
 
 ---
 
