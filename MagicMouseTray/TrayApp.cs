@@ -18,14 +18,14 @@ internal sealed class TrayApp : IDisposable
     readonly ToolStripMenuItem[] _thresholdItems;
     readonly ToolStripMenuItem _startupItem;
 
-    int _lastPct = -1;
-    string _lastName = string.Empty;
+    // Per-device battery state, keyed by device name. Updated per poll event.
+    // Cleared when no devices are detected (empty name from AdaptivePoller).
+    readonly Dictionary<string, int> _deviceBatteries = new(StringComparer.OrdinalIgnoreCase);
 
-    // Tracks which alert boundaries have already fired this drain cycle.
-    // Boundaries: [user threshold, 10%]. Cleared when battery returns above threshold or disconnects.
-    readonly HashSet<int> _firedBoundaries = new();
+    // Alert boundaries fired per-device this drain cycle. Cleared per-device when battery recovers.
+    readonly Dictionary<string, HashSet<int>> _firedBoundaries = new(StringComparer.OrdinalIgnoreCase);
 
-    // Persistent critical alert shown at 1%; auto-closed when mouse plugs in (pct=-1).
+    // Persistent critical alert shown at 1%; auto-closed when mouse unplugs.
     CriticalAlert? _criticalAlert;
 
     readonly DriverStatus _driverStatus;
@@ -125,8 +125,8 @@ internal sealed class TrayApp : IDisposable
         var testToast = new ToolStripMenuItem("Test Notification");
         testToast.Click += (_, _) =>
         {
-            var dev = _lastName.Length > 0 ? _lastName : "Magic Mouse";
-            ToastNotifier.Show(_lastPct >= 0 ? _lastPct : 15, dev);
+            var (name, pct) = _deviceBatteries.FirstOrDefault(kv => kv.Value >= 0);
+            ToastNotifier.Show(pct >= 0 ? pct : 15, name?.Length > 0 ? name : "Magic Mouse");
         };
         menu.Items.Add(testToast);
 
@@ -156,71 +156,103 @@ internal sealed class TrayApp : IDisposable
         // Marshal to WPF/STA thread — NotifyIcon was created there
         System.Windows.Application.Current.Dispatcher.Invoke(() =>
         {
-            _lastPct = pct;
-            if (!string.IsNullOrEmpty(name)) _lastName = name;
-
-            bool isLow = pct >= 0 && pct < _config.Threshold;
-            var device = _lastName.Length > 0 ? _lastName : "Magic Mouse";
-
-            // Cascading alerts: fire at user threshold, then again at 10% critical boundary.
-            // _firedBoundaries resets when battery recovers above threshold or disconnects.
-            if (pct < 0 || pct >= _config.Threshold)
+            if (string.IsNullOrEmpty(name))
             {
+                // Sentinel from AdaptivePoller: no devices found this cycle — clear all state
+                _deviceBatteries.Clear();
                 _firedBoundaries.Clear();
             }
             else
             {
-                var boundaries = _config.Threshold > 10
-                    ? new[] { _config.Threshold, 10 }
-                    : new[] { _config.Threshold };
+                _deviceBatteries[name] = pct;
 
-                foreach (var boundary in boundaries)
+                // Per-device alert boundaries
+                if (pct < 0 || pct >= _config.Threshold)
                 {
-                    if (pct < boundary && _firedBoundaries.Add(boundary))
+                    _firedBoundaries.Remove(name);
+                }
+                else
+                {
+                    if (!_firedBoundaries.TryGetValue(name, out var fired))
+                        _firedBoundaries[name] = fired = new HashSet<int>();
+
+                    var boundaries = _config.Threshold > 10
+                        ? new[] { _config.Threshold, 10 }
+                        : new[] { _config.Threshold };
+
+                    foreach (var boundary in boundaries)
                     {
-                        ToastNotifier.Show(pct, device);
-                        break; // one toast per poll cycle
+                        if (pct < boundary && fired.Add(boundary))
+                        {
+                            ToastNotifier.Show(pct, name);
+                            break;
+                        }
                     }
+                }
+
+                // Critical alert at 1% — use first device that hits it
+                if (pct == 1 && _criticalAlert == null)
+                {
+                    _criticalAlert = new CriticalAlert(pct, name);
+                    _criticalAlert.FormClosed += (_, _) => _criticalAlert = null;
+                    _criticalAlert.Show();
+                    Logger.Log($"CRITICAL_ALERT_SHOWN device={name} pct={pct}");
                 }
             }
 
-            // Persistent critical alert at 1% — auto-closes when mouse plugs in (pct=-1)
-            if (pct == 1 && _criticalAlert == null)
-            {
-                _criticalAlert = new CriticalAlert(pct, device);
-                _criticalAlert.FormClosed += (_, _) => _criticalAlert = null;
-                _criticalAlert.Show();
-                Logger.Log($"CRITICAL_ALERT_SHOWN pct={pct}");
-            }
-            else if (pct < 0 && _criticalAlert != null)
+            // Close critical alert when all devices are gone or the alerting device reconnects
+            if (_criticalAlert != null && (_deviceBatteries.Count == 0 ||
+                _deviceBatteries.Values.All(p => p < 0)))
             {
                 _criticalAlert.Close();
-                Logger.Log("CRITICAL_ALERT_CLOSED reason=charging");
+                Logger.Log("CRITICAL_ALERT_CLOSED reason=no_devices");
             }
 
-            // Update icon (badge dot in corner when driver not OK)
-            var newIcon = MakeIcon(pct, isLow, _driverStatus != DriverStatus.Ok);
-            var oldIcon = _currentIcon;
-            _tray.Icon = newIcon;
-            _currentIcon = newIcon;
-            oldIcon?.Dispose();
-
-            // Update tooltip (max 63 chars — Windows limit).
-            // pct=-1 means disconnected (no Apple Magic Mouse path responded).
-            // pct=-2 means inaccessible (path found, Apple driver in unified-mode trapping
-            // Feature Report 0x47 behind mouhid exclusivity — see PRD-184 / MouseBatteryReader).
-            var interval = AdaptivePoller.GetInterval(pct);
-            var pctStr = pct switch {
-                >= 0 => $"{pct}%",
-                -2   => "battery N/A",
-                _    => "disconnected",
-            };
-            var baseTip = $"{device} - {pctStr} · Next: {FormatInterval(interval)}";
-            var tip = _driverStatus != DriverStatus.Ok ? $"⚠ Driver | {baseTip}" : baseTip;
-            _tray.Text = tip.Length > 63 ? tip[..63] : tip;
-
-            Logger.Log($"TRAY_UPDATE pct={pct} isLow={isLow} tooltip=\"{_tray.Text}\"");
+            UpdateTrayIcon();
         });
+    }
+
+    void UpdateTrayIcon()
+    {
+        // Icon driven by the lowest valid battery across all devices
+        int lowestPct = _deviceBatteries.Count == 0
+            ? -1
+            : _deviceBatteries.Values.Aggregate(-1, (acc, p) =>
+                p >= 0 ? (acc < 0 ? p : Math.Min(acc, p)) : acc);
+
+        bool anyLow = lowestPct >= 0 && lowestPct < _config.Threshold;
+
+        var newIcon = MakeIcon(lowestPct, anyLow, _driverStatus != DriverStatus.Ok);
+        var oldIcon = _currentIcon;
+        _tray.Icon = newIcon;
+        _currentIcon = newIcon;
+        oldIcon?.Dispose();
+
+        // Tooltip: list all devices, truncate to 63 chars (Windows limit)
+        string tip;
+        if (_deviceBatteries.Count == 0)
+        {
+            tip = "Magic Mouse Battery — no devices detected";
+        }
+        else
+        {
+            var parts = _deviceBatteries.Select(kv =>
+            {
+                var pctStr = kv.Value switch {
+                    >= 0 => $"{kv.Value}%",
+                    -2   => "N/A",
+                    _    => "—",
+                };
+                return $"{kv.Key}: {pctStr}";
+            });
+            var joined = string.Join(" | ", parts);
+            var interval = AdaptivePoller.GetInterval(lowestPct);
+            tip = $"{joined} · {FormatInterval(interval)}";
+            if (_driverStatus != DriverStatus.Ok) tip = $"⚠ {tip}";
+        }
+
+        _tray.Text = tip.Length > 63 ? tip[..63] : tip;
+        Logger.Log($"TRAY_UPDATE devices={_deviceBatteries.Count} lowest={lowestPct} tooltip=\"{_tray.Text}\"");
     }
 
     static string FormatInterval(TimeSpan t)

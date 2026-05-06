@@ -19,6 +19,7 @@
 // false; caller (SelfHealManager) gives up and enters Failed state.
 
 using System.Diagnostics;
+using System.IO;
 
 namespace MagicMouseTray;
 
