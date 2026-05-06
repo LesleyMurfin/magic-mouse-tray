@@ -1,17 +1,26 @@
 # Session 15 — Empirical Test Results & Patching Plan
 
-**Date**: 2026-05-05
+**Date**: 2026-05-05 / **Updated**: 2026-05-06
 **Author**: agent (autonomous)
-**Status**: data collection complete, plan pending user approval
+**Status**: data collection complete; PATH-A INVALIDATED on 2026-05-06; awaiting user decision on remaining paths
 **Hardware**: Magic Mouse v3 (PID 0x0323), MAC D0:C0:50:CC:8C:4D
 **OS**: Windows 11 build 26100
 **Goal**: cursor + scroll + battery simultaneously, NO M14 rewrite
 
 ---
 
-## BLUF
+## BLUF (revised 2026-05-06)
 
-Today's tests refute the assumption that the binary-patched Apple driver (66288 bytes, MD5 `74756dc8...`) is a "small delta from original". The patch re-architected the descriptor (5→2 buttons, single TLC→split TLCs, Feature 0x47→Input 0x90 battery) and that re-architecture is the most likely cause of `STATUS_INVALID_PARAMETER_MIX`. Two independent expert reviews (Gemini Flash + Pro) converge on **PATH-A: append-only descriptor patch** as the highest-viability untested option. PATH-A blocked in-place by only 4 bytes of zero-padding after the descriptor; needs descriptor relocation (find pointer reference, update). Apple stock driver is currently restored — cursor + scroll work, no battery (Mode B / Descriptor B / unified).
+**PATH-A invalidated**: exhaustive search of Apple's binary on 2026-05-06 found **zero references** to the descriptor at file offset 0xA850 — no LEA RIP-rel, no `mov rax, imm64`, no relocations, no 32-bit immediate constants pointing there. The bytes at 0xA850 appear to be **inert build-leftover data**. Patching them likely does nothing. The 04-30 doc claim "COL01+COL02 created from patched 2-TLC descriptor" was probably misattributed (mouse happened to be in Mode A at that moment, independent of the patch).
+
+Yesterday's button-count claim (5→2) was also **wrong** — both descriptors declare 2 buttons identically. The actual diff is in TLC structure (vendor pad removed, RID 0x27 association lost, separate TLC2 added).
+
+**Surviving paths** (none involve M14):
+1. **Deeper RE investigation** — find the actual descriptor source via Ghidra trace of IOCTL 0x00410210 handler at file offset 0x810A. 2-4 hr coin-flip outcome. If successful, leads to a viable binary patch.
+2. **PATH-B (Phase 4-Omega userland recycler)** — deterministic; all three behaviors with ~5s scroll glitch per battery poll. Multi-device support (keyboard + v1/v2/v3 mice).
+3. **Accept current state** — cursor + scroll only, no battery indicator.
+
+Apple stock driver is currently restored — cursor + scroll work, no battery (Mode B / Descriptor B / unified).
 
 ---
 
@@ -108,20 +117,65 @@ Today's tests refute the assumption that the binary-patched Apple driver (66288 
 
 ---
 
-## PATH-A Construction Attempt (today)
+## PATH-A Construction (2026-05-05) — INVALIDATED 2026-05-06
 
-**Approach**: keep Apple's original 116-byte descriptor at 0xA850 byte-for-byte; append 22-byte TLC2 (UP=0xFF00, Usage=0x14, RID=0x90, vendor battery) copied verbatim from WDF Session-14's known-working TLC2.
+**Approach (initial)**: keep Apple's original 116-byte descriptor at 0xA850 byte-for-byte; append 22-byte TLC2.
 
-**Blockers identified**:
-1. Only **4 bytes of zero-padding** immediately after the descriptor at 0xA8C4. Insufficient for 22-byte append.
-2. Region 0xA8C4..0xA8DC contains float constants (0x80 0x3F = 1.0f, etc.) — NOT safe to overwrite.
-3. Descriptor-length immediates `116` (0x74) found in binary as raw u32 at offsets 0x1FC, 0x201, 0x77B6, 0x9BAA, 0xE22C. Need to disassemble to identify which is the descriptor length vs PE/struct fields.
+**Blockers from 2026-05-05**:
+1. Only **4 bytes of zero-padding** immediately after the descriptor at 0xA8C4 (followed by float constants).
+2. Required relocating descriptor + patching pointer/length references.
 
-**Required next steps to complete PATH-A**:
-1. Disassemble applewirelessmouse.sys to find the descriptor pointer (`lea rax, [0xA850]` or similar) and the length immediate that flows together with it.
-2. Choose relocation target: either (a) freed Apple PE cert space (after signtool removed Apple's 12KB cert overlay), or (b) extend a section. (a) is simpler.
-3. Build relocated descriptor at the new offset, patch the pointer instruction, patch the length immediate, sign with MagicMouseFix cert.
-4. Install via `RUN-AS-SYSTEM` route. Test with cache clear + restart-device + wake mouse.
+### 2026-05-06 finding — PATH-A is fundamentally broken
+
+Exhaustive search of `applewirelessmouse.sys` (78424-byte WHQL stock binary) for any reference to the descriptor at file offset 0xA850 / RVA 0xC050 / VA 0x14000C050:
+
+| Reference type | Hits |
+|---|---|
+| 8-byte abs VA `0x14000C050` (LE) | **0** |
+| 4-byte RVA `0xC050` (LE) | **0** |
+| LEA RIP-rel pointing to 0xC050..0xC0C4 in any R-X section | **0** |
+| Relocations into the descriptor RVA range | **0** |
+| 32-bit immediate `0xA850` anywhere | **0** |
+
+The IOCTL 0x00410210 handler at file offset 0x810A dispatches via WDF function pointers (indirect calls through `mov rax, [rip+0x58XX]`) — not via direct LEA to a static descriptor. The two LEA instructions in the .data range that are near the descriptor point to:
+- RVA 0xC0C8 (file 0xA8C8): float constants AFTER the descriptor end
+- RVA 0xC160 (file 0xA960): zero-region
+
+Neither is the descriptor itself.
+
+**Implication**: the bytes at 0xA850 are inert — likely build-leftover data that was never wired into Apple's runtime. Patching them does not change what HidBth receives. The 04-30 doc claim of "COL01+COL02 from patched 2-TLC descriptor" was misattributed (mouse was in Mode A at that moment via cache state, independent of the patch). The 66288-byte FAILED_START is unrelated to descriptor content — likely caused by re-signing damaging WDF metadata or other integrity checks.
+
+### Yesterday's button-count claim was also wrong
+
+Comparison of original vs patched at offsets 8-22 (mouse button definition):
+```
+ORIG  bytes 8-22: 05 09 19 01 29 02 15 00 25 01 95 02 75 01 81
+PATCH bytes 8-22: 05 09 19 01 29 02 15 00 25 01 95 02 75 01 81  (identical)
+```
+Both declare **2 buttons** (UsageMax=2, ReportCount=2). The actual diff starts at offset +27 (74 of 116 bytes differ — substantial but not in the buttons region).
+
+### What IS different in the patched 116-byte descriptor
+
+Real differences (not 5→2 buttons as claimed yesterday):
+- Original TLC1 has UsagePage 0xFF02 vendor padding (1 bit) at +030 — removed in patched
+- Original TLC1 has UsagePage=6 + Usage=1 association preceding RID 0x27 input — removed in patched (RID 0x27 inherits LogicalMin=129, LogicalMax=127 from the X/Y physical collection, declared with no Usage → relies on Const flag)
+- Original TLC1 has Feature RID=0x47 phantom battery (14 bytes) — removed in patched
+- Patched added new TLC2 (UP=0xFF00 Usage=0x14) with RID=0x90 input + RID=0x91 feature padding
+
+Even if these layout differences were causal, **the patch can't reach Apple's runtime because nothing in the binary reads from 0xA850**.
+
+---
+
+## Decision Required (2026-05-06)
+
+| Option | Outcome | Effort | Risk |
+|---|---|---|---|
+| **A. Deeper RE investigation (Ghidra)** | Find actual descriptor source via IOCTL handler 0x810A trace. If found → viable patch. If not → confirms PATH-A dead. | 2-4 hr | Coin-flip viability |
+| **B. PATH-B userland recycler + multi-device tray** | Cursor + scroll + battery (with ~5s poll-time scroll glitch). Plus keyboard/v1/v2/v3 simultaneous battery display. | C# tray-app changes only | Low |
+| **C. Accept current state** | Cursor + scroll work. No battery. | 0 | None |
+
+PRD for Option B authored as `docs/PRD-PATH-B-USERLAND-RECYCLER.md`.
+Investigation prompt for Option A authored as `docs/INVESTIGATION-PROMPT-GHIDRA-DESCRIPTOR-TRACE.md`.
 
 **Estimated effort**: 1-2 hours for someone comfortable with x86-64 PE patching + Ghidra. Brittle; subject to break by future Windows updates.
 
