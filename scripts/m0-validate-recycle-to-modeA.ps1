@@ -94,7 +94,7 @@ function Get-BthenumHidInstanceId {
         Where-Object { $_.InstanceId -match 'BTHENUM\\\{00001124[^\\]*VID&0001004C_PID&0323' -and
                        $_.Status -eq 'OK' } |
         Select-Object -First 1
-    return $dev?.InstanceId
+    return $(if ($dev) { $dev.InstanceId } else { $null })
 }
 
 function Get-Col02Device {
