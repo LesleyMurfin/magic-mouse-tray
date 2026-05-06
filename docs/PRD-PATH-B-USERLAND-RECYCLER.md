@@ -139,7 +139,53 @@ A device is "detected" if its BTHENUM PDO is enumerated and Status=OK. Detection
 
 ## Milestones
 
+### M0 — **GATING VALIDATION** (must pass before M1+ work begins) — added 2026-05-06
+
+**Problem**: PATH-B's core assumption — that we can flip the v3 mouse from Mode B (current steady state, scroll works, no battery) into Mode A (battery readable, scroll broken) on demand — has **NOT been empirically validated**.
+
+What HAS been confirmed:
+- H-009 (2026-04-27, Phase 4-Omega): a `pnputil /restart-device` cycle of the BTHENUM HID PDO reliably flips Phase-4-Omega "State B → State A". **Per Phase 4-Omega's reversed naming convention vs current PSN**, that translates to `Mode A (split, battery readable, scroll broken) → Mode B (unified, scroll works, no battery)` in current PSN terms. This is the *natural recovery direction* — PATH-B does NOT need this.
+
+What HAS NOT been confirmed:
+- **H-012 — NOT YET TESTED — was deprioritized**: a targeted PnP recycle deterministically restores Mode A on v3 from a Mode B steady state. This is exactly what PATH-B requires.
+- H-010 explicit note: *"PnP recycle (Disable+Enable BTHENUM HID PDO) CAN restore Descriptor A but is **non-deterministic** — both A and B can come out the other side."*
+
+If recycle-to-Mode-A is non-deterministic at high frequency (e.g. <70% success), PATH-B is non-viable as designed and would either:
+  (a) need a more aggressive trigger (temporary `applewirelessmouse` filter detach + recycle, then re-attach)
+  (b) need a different recycle target (BTHPORT cache delete + restart, BTHENUM parent disable+enable, BTHENUM Dev container, etc.)
+  (c) escalate back to deeper investigation (the Ghidra prompt) or PATH-C (accept current state)
+
+**M0 deliverables**:
+- [ ] Standalone test harness (`scripts/m0-validate-recycle-to-modeA.ps1`) that runs N=100 recycle attempts on the v3 BTHENUM HID PDO from the current Mode B steady state
+- [ ] Each attempt:
+  1. Capture pre-state: HIDP_GetCaps on every COL device, descriptor length, COL01/COL02 enumeration
+  2. Run `pnputil /restart-device` on BTHENUM HID PDO
+  3. Wait up to 30 s for stable post-state
+  4. Capture post-state
+  5. Optional battery probe: if COL02 enumerated, attempt `HidD_GetInputReport(0x90)` and verify byte[2] in 0..100 range
+  6. Wait 5 s, restore Mode B if still in Mode A (so each attempt starts from Mode B)
+- [ ] Classify each attempt: `MODE_A_REACHED`, `MODE_B_LOCKED`, `ERROR_22_DISABLED`, `ERROR_OTHER`, `BATTERY_READ_OK`, `BATTERY_READ_FAIL`
+- [ ] Aggregate report: success rate, time-to-Mode-A distribution (P50/P95), Mode B recovery time, error breakdown
+- [ ] Verdict thresholds:
+  - **success rate ≥ 70%**: M0 PASS — continue to M1
+  - **30% ≤ success rate < 70%**: M0 PARTIAL — design retry / exponential backoff in M3 to compensate (e.g. retry up to 3× before reporting battery unavailable)
+  - **success rate < 30%**: M0 FAIL — escalate to sub-tests:
+    - Sub-test M0a: try filter detach (remove `applewirelessmouse` from `LowerFilters`) + recycle + verify Mode A → re-add filter → verify Mode B recovery
+    - Sub-test M0b: try BTHPORT cache delete (`Services\BTHPORT\Parameters\Devices\<MAC>\Cache\*`) + recycle
+    - Sub-test M0c: try BTHENUM parent recycle (not just HID PDO) — cycle the BTHENUM `\Dev_<MAC>` container
+    - Sub-test M0d: try `pnputil /scan-devices` after disable
+    - Pick the highest-success-rate trigger; revise this PRD before continuing
+
+**Exit criteria**:
+- M0 report file at `docs/M0-MODE-B-TO-A-VALIDATION.md` with success rate, recommended trigger, raw data, and PASS/PARTIAL/FAIL verdict
+- PR review of M0 report before M1 begins
+
+**Estimated effort**: 2-4 hours (test harness + 100 recycle samples + analysis). Fully scriptable via the existing `MM-Dev-Cycle` SYSTEM scheduled task; no manual mouse interaction required for the recycle itself (mouse must be paired and powered).
+
+**Risk if skipped**: PRD M1-M6 builds the entire tray UX on a primitive that may not work reliably. The 2-4 hour upfront cost saves potential weeks of M3 rework.
+
 ### M1 — Multi-device detection scaffolding
+- [ ] **Gated by M0 PASS or PARTIAL**
 - [ ] Refactor `MouseBatteryReader.cs` into per-device readers behind a common `IBatteryDevice` interface
 - [ ] Add `KeyboardBatteryReader.cs` (Feature 0x47 path)
 - [ ] Add device registry that scans BTHENUM children every 60 s and on PnP change events
@@ -190,6 +236,20 @@ A device is "detected" if its BTHENUM PDO is enumerated and Status=OK. Detection
 3. **Q3 — keyboard descriptor cache**: does the keyboard have an analogous Mode A/B issue, or does Feature 0x47 work consistently? Per research-findings.md "kbdhid lock makes Feature 0x47 wedge" — needs M1 validation.
 4. **Q4 — multiple v3 mice**: edge case if user has two v3 mice paired. Each has its own BTHENUM and each needs its own recycle. Race-condition during simultaneous recycles.
 5. **Q5 — battery telemetry retention**: how much history to keep? Default 30 days?
+6. **Q6 — recycle-to-Mode-A reliability**: M0 must answer this. If non-deterministic at high frequency, design changes (filter-detach trigger) needed. Discovered as a gap when reviewing PHASE4-OMEGA-PLAN.md vs current PSN naming convention (the conventions are reversed — "State A" in Phase 4-Omega = "Mode B" today). H-009 confirmed Mode A → Mode B (natural recovery), but H-012 (Mode B → Mode A) is **NOT YET TESTED**. PATH-B requires the latter.
+
+---
+
+## Naming Convention Note (avoid future confusion)
+
+`PHASE4-OMEGA-PLAN.md` (Session 10) and current PSN-0001 (post-AP-21 H-010 revised) use **opposite** State A/B labels:
+
+| Reference | "State A" | "State B" |
+|---|---|---|
+| Phase 4-Omega Session 10 doc | scroll works, no battery (= unified) | scroll broken, battery readable (= split) |
+| PSN-0001 current (post-AP-21) | **Mode A = split / battery readable** | **Mode B = unified / scroll works** |
+
+**This PRD uses the current PSN convention throughout** (Mode A = battery, Mode B = scroll).
 
 ---
 
