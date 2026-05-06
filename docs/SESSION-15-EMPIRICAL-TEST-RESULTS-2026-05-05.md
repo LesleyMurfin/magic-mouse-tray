@@ -9,18 +9,25 @@
 
 ---
 
-## BLUF (revised 2026-05-06)
+## BLUF (revised 2026-05-06 evening — Session 16 update)
 
-**PATH-A invalidated**: exhaustive search of Apple's binary on 2026-05-06 found **zero references** to the descriptor at file offset 0xA850 — no LEA RIP-rel, no `mov rax, imm64`, no relocations, no 32-bit immediate constants pointing there. The bytes at 0xA850 appear to be **inert build-leftover data**. Patching them likely does nothing. The 04-30 doc claim "COL01+COL02 created from patched 2-TLC descriptor" was probably misattributed (mouse happened to be in Mode A at that moment, independent of the patch).
+**~~PATH-A invalidated~~ — RETRACTION**: my morning 2026-05-06 claim "zero references to the descriptor at 0xA850" was **wrong**. My scanner only searched for `48 8d` LEA RIP-rel and `48 b8` MOV imm64. Apple actually loads the descriptor via **SSE 128-bit loads** — `movups xmm, xmmword ptr [rip+disp]` — which weren't in my pattern set.
 
-Yesterday's button-count claim (5→2) was also **wrong** — both descriptors declare 2 buttons identically. The actual diff is in TLC structure (vendor pad removed, RID 0x27 association lost, separate TLC2 added).
+Session 16 (autonomous Ghidra/capstone investigation) confirmed:
+- **Two patch sites** in F3 SDP completion callback at VA 0x14000a440: file 0x9611 (length-recompression path) + 0x96e5 (drop-in replace path)
+- Both copy exactly 116 bytes: 7 × 16-byte SSE loads + 1 × 4-byte DWORD = 0x74
+- **No Mode A/B branching in the filter** — Apple unconditionally injects the same 116 bytes. Mode mutual exclusion (H-010) lives in HidBth's downstream cache, not in the filter.
+- See `docs/SESSION-16-GHIDRA-DESCRIPTOR-TRACE.md` for full evidence
+- PSN-0001 H-010 re-revised; H-019 added
 
-**Surviving paths** (none involve M14):
-1. **Deeper RE investigation** — find the actual descriptor source via Ghidra trace of IOCTL 0x00410210 handler at file offset 0x810A. 2-4 hr coin-flip outcome. If successful, leads to a viable binary patch.
-2. **PATH-B (Phase 4-Omega userland recycler)** — deterministic; all three behaviors with ~5s scroll glitch per battery poll. Multi-device support (keyboard + v1/v2/v3 mice).
+The button-count claim from morning (5→2) was also **wrong** — both descriptors declare 2 buttons identically. The actual diff is in TLC structure (vendor pad removed, RID 0x27 UsagePage association lost, separate TLC2 added).
+
+**Revised surviving paths**:
+1. **PATH-A (binary patch descriptor at 0xA850)** — CONFIRMED VIABLE. Patch must keep length at exactly 116 bytes OR also patch the SSE-load count + DWORD load at 0x9611 + 0x96e5. Higher blast radius; needs design pass + APEX gate before execution.
+2. **PATH-B (Phase 4-Omega userland recycler)** — still on the table; gated by M0 Mode B → Mode A reliability validation. See `docs/PRD-PATH-B-USERLAND-RECYCLER.md`.
 3. **Accept current state** — cursor + scroll only, no battery indicator.
 
-Apple stock driver is currently restored — cursor + scroll work, no battery (Mode B / Descriptor B / unified).
+Apple stock driver is currently restored — cursor + scroll work, no battery (Mode B / unified).
 
 ---
 
@@ -125,9 +132,9 @@ Apple stock driver is currently restored — cursor + scroll work, no battery (M
 1. Only **4 bytes of zero-padding** immediately after the descriptor at 0xA8C4 (followed by float constants).
 2. Required relocating descriptor + patching pointer/length references.
 
-### 2026-05-06 finding — PATH-A is fundamentally broken
+### 2026-05-06 morning finding (RETRACTED 2026-05-06 evening)
 
-Exhaustive search of `applewirelessmouse.sys` (78424-byte WHQL stock binary) for any reference to the descriptor at file offset 0xA850 / RVA 0xC050 / VA 0x14000C050:
+Exhaustive search of `applewirelessmouse.sys` (78424-byte WHQL stock binary) for references to the descriptor at file offset 0xA850 found:
 
 | Reference type | Hits |
 |---|---|
@@ -137,13 +144,33 @@ Exhaustive search of `applewirelessmouse.sys` (78424-byte WHQL stock binary) for
 | Relocations into the descriptor RVA range | **0** |
 | 32-bit immediate `0xA850` anywhere | **0** |
 
-The IOCTL 0x00410210 handler at file offset 0x810A dispatches via WDF function pointers (indirect calls through `mov rax, [rip+0x58XX]`) — not via direct LEA to a static descriptor. The two LEA instructions in the .data range that are near the descriptor point to:
-- RVA 0xC0C8 (file 0xA8C8): float constants AFTER the descriptor end
-- RVA 0xC160 (file 0xA960): zero-region
+**~~Implication: the bytes at 0xA850 are inert build-leftover data.~~** **RETRACTED — see Session 16 below.**
 
-Neither is the descriptor itself.
+### 2026-05-06 evening — Session 16 correction
 
-**Implication**: the bytes at 0xA850 are inert — likely build-leftover data that was never wired into Apple's runtime. Patching them does not change what HidBth receives. The 04-30 doc claim of "COL01+COL02 from patched 2-TLC descriptor" was misattributed (mouse was in Mode A at that moment via cache state, independent of the patch). The 66288-byte FAILED_START is unrelated to descriptor content — likely caused by re-signing damaging WDF metadata or other integrity checks.
+The morning scan was incomplete. It searched for `48 8d` LEA RIP-rel and `48 b8` MOV imm64 patterns. Apple's binary loads the descriptor via **SSE 128-bit loads** — `0F 10 ...` / `movups xmm, xmmword ptr [rip+disp]` — which were not in my search set.
+
+Session 16 capstone-based static disassembly found:
+
+| Reference site | Bytes | Purpose |
+|---|---|---|
+| File 0x9611 (length-recompression path in F3 callback at VA 0x14000a440) | 7 × `movups xmm, [rip+disp]` (16 bytes each) + 1 × DWORD load (4 bytes) | Copies 7×16+4 = 116 bytes from 0xA850 into the SDP response buffer |
+| File 0x96e5 (drop-in replace path, same callback) | identical pattern | Same 116-byte copy |
+
+**Math check**: 7 × 16 + 4 = 116 bytes = 0x74 = exactly the descriptor length.
+
+**Updated implication**: the bytes at 0xA850 ARE actively used. Both code blocks copy them. **PATH-A (binary patch the descriptor) is VIABLE.** No Mode A/B branching exists in the filter — Apple unconditionally injects the same 116 bytes. H-010's "modes are mutually exclusive in the applewirelessmouse filter" framing is wrong; the mode mutual exclusion is a **HidBth caching artifact downstream of Apple's filter**.
+
+The 04-30 patched binary FAILED_START remains unexplained at the descriptor level — likely:
+- The 04-30 patch broke TLC1's mouse-report byte layout in a way Apple's gesture engine can't tolerate (per H-016 — Apple's runtime composes output reports based on its expected layout)
+- OR re-signing damaged something else (WDF integrity check, etc.)
+
+For PATH-A to succeed, the patch must:
+1. Keep the descriptor length at exactly 116 bytes (or also patch the SSE-load count + DWORD load instructions at 0x9611 + 0x96e5)
+2. Preserve TLC1's mouse-report byte layout exactly (so Apple's gesture engine still works)
+3. Trim or replace unused TLC1 content (e.g. phantom Feature 0x47, 14 bytes) to make room for a vendor battery TLC2
+
+See `docs/SESSION-16-GHIDRA-DESCRIPTOR-TRACE.md` for the full investigation report.
 
 ### Yesterday's button-count claim was also wrong
 
@@ -166,16 +193,18 @@ Even if these layout differences were causal, **the patch can't reach Apple's ru
 
 ---
 
-## Decision Required (2026-05-06)
+## Decision Required (revised 2026-05-06 evening)
 
 | Option | Outcome | Effort | Risk |
 |---|---|---|---|
-| **A. Deeper RE investigation (Ghidra)** | Find actual descriptor source via IOCTL handler 0x810A trace. If found → viable patch. If not → confirms PATH-A dead. | 2-4 hr | Coin-flip viability |
-| **B. PATH-B userland recycler + multi-device tray** | Cursor + scroll + battery (with ~5s poll-time scroll glitch). Plus keyboard/v1/v2/v3 simultaneous battery display. | C# tray-app changes only | Low |
+| **A. PATH-A binary patch (now CONFIRMED viable)** | Patch 116-byte descriptor at file 0xA850 to add a vendor battery TLC2 while preserving TLC1 mouse byte layout. Re-sign with existing CN=MagicMouseFix cert. Deliver cursor + scroll + battery from a single Apple-derived binary. | ~1-2 hr (design + edit + sign + install + verify) | Medium — must preserve TLC1 byte layout per H-016 + keep length at exactly 116 bytes; re-sign may have broken 04-30 attempt for unrelated reasons (WDF integrity check?) |
+| **B. PATH-B userland recycler + multi-device tray** | Cursor + scroll + battery (with ~5s poll-time scroll glitch). Plus keyboard/v1/v2/v3 simultaneous battery display. Gated by M0 Mode B → Mode A reliability validation. | C# tray-app changes + 2-4 hr M0 validation | Low |
 | **C. Accept current state** | Cursor + scroll work. No battery. | 0 | None |
 
-PRD for Option B authored as `docs/PRD-PATH-B-USERLAND-RECYCLER.md`.
-Investigation prompt for Option A authored as `docs/INVESTIGATION-PROMPT-GHIDRA-DESCRIPTOR-TRACE.md`.
+PRD for Option B authored as `docs/PRD-PATH-B-USERLAND-RECYCLER.md` (M0 gating added).
+Session 16 investigation report establishing Option A viability: `docs/SESSION-16-GHIDRA-DESCRIPTOR-TRACE.md`.
+
+A separate APEX gate is required before executing Option A — the patch design (which TLC1 bytes to sacrifice for room for the new TLC2) needs review before edit.
 
 **Estimated effort**: 1-2 hours for someone comfortable with x86-64 PE patching + Ghidra. Brittle; subject to break by future Windows updates.
 
