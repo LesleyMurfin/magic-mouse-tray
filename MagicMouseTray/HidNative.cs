@@ -1,5 +1,6 @@
 // P/Invoke declarations for HID and SetupDi APIs shared across all device readers.
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 namespace MagicMouseTray;
@@ -62,6 +63,62 @@ internal static class HidNative
 
     [DllImport("setupapi.dll")]
     internal static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiEnumDeviceInfo(IntPtr DeviceInfoSet, uint MemberIndex,
+        ref SP_DEVINFO_DATA DeviceInfoData);
+
+    // cfgmgr32: read device instance ID string from devnode handle
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern uint CM_Get_Device_ID(uint dnDevInst, StringBuilder Buffer, uint BufferLen, uint ulFlags);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SP_DEVINFO_DATA
+    {
+        public uint cbSize;
+        public Guid ClassGuid;
+        public uint DevInst;
+        public IntPtr Reserved;
+    }
+
+    // GUID_DEVCLASS_MOUSE — Mouse class devices created by mouhid.sys when it binds to HID device
+    static readonly Guid MouseClassGuid = new("4d36e96f-e325-11ce-bfc1-08002be10318");
+
+    // Returns true if a Mouse class device with a v3 Magic Mouse instance ID exists and is present.
+    // mouhid.sys creates a Mouse class device only after it successfully binds — this is the
+    // definitive signal that cursor input is restored (unlike CreateFile which fires at PnP enumeration,
+    // before mouhid has attached). The Mouse class device instance ID directly encodes VID/PID.
+    //
+    // Note: uses DIGCF_PRESENT only (not DIGCF_DEVICEINTERFACE) — Mouse class devices are device
+    // instances, not HID interface paths. Using DIGCF_DEVICEINTERFACE returns an empty set.
+    internal static bool IsV3MouseClassPresent()
+    {
+        var guid = MouseClassGuid;
+        var devs = SetupDiGetClassDevs(ref guid, null, IntPtr.Zero, DIGCF_PRESENT);
+        if (devs == IntPtr.Zero || devs == INVALID_HANDLE_VALUE) return false;
+        try
+        {
+            uint idx = 0;
+            while (true)
+            {
+                var info = new SP_DEVINFO_DATA();
+                info.cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>();
+                if (!SetupDiEnumDeviceInfo(devs, idx++, ref info)) break;
+
+                // The Mouse class device instance ID directly contains VID/PID markers.
+                // e.g. HID\{00001124-...}_VID&0001004C_PID&0323\A&31E5D054&1B&0000
+                var idBuf = new StringBuilder(512);
+                if (CM_Get_Device_ID(info.DevInst, idBuf, (uint)idBuf.Capacity, 0) != 0) continue;
+                var id = idBuf.ToString().ToLowerInvariant();
+
+                if ((id.Contains("0001004c") && id.Contains("0323")) ||
+                    (id.Contains("vid_05ac") && id.Contains("pid_0323")))
+                    return true;
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(devs); }
+        return false;
+    }
 
     // Enumerates all present HID device interface paths.
     internal static IEnumerable<string> EnumerateHidPaths()

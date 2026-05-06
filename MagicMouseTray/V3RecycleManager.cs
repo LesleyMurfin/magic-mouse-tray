@@ -257,8 +257,11 @@ internal sealed class V3RecycleManager : IDisposable
             IsV3Path(p) &&
             p.Contains("col02", StringComparison.OrdinalIgnoreCase));
 
-    // True if a v3 Magic Mouse unified path exists (no split collections) and is accessible.
-    // Accessibility via CreateFile(0 access) confirms mouhid.sys has finished binding.
+    // True if a v3 Magic Mouse is in Mode B: unified HID path exists (no col0x splits)
+    // AND mouhid.sys has bound (confirmed via Mouse class device enumeration).
+    // mouhid creates a Mouse class device node only after successful binding — this is the
+    // definitive signal that cursor input is restored. CreateFile(0) fires at PnP enumeration
+    // time, which precedes mouhid binding by 0–2s and is NOT a reliable proxy (2026-05-06).
     static bool IsV3InModeB()
     {
         var v3Paths = HidNative.EnumerateHidPaths()
@@ -271,12 +274,8 @@ internal sealed class V3RecycleManager : IDisposable
         if (v3Paths.Any(p => p.Contains("&col0", StringComparison.OrdinalIgnoreCase)))
             return false;
 
-        // Confirm mouhid has bound by verifying the unified path is openable
-        var unifiedPath = v3Paths[0];
-        using var h = HidNative.CreateFile(unifiedPath, 0,
-            HidNative.FILE_SHARE_READ | HidNative.FILE_SHARE_WRITE,
-            IntPtr.Zero, HidNative.OPEN_EXISTING, 0, IntPtr.Zero);
-        return !h.IsInvalid;
+        // Confirm mouhid has bound: Mouse class device with v3 parent exists in device tree
+        return HidNative.IsV3MouseClassPresent();
     }
 
     // True if the HID device path belongs to a Magic Mouse v3 (BT or USB).
