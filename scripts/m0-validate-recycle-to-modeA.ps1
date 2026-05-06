@@ -216,6 +216,9 @@ for ($i = 1; $i -le $N; $i++) {
         $modeAMs.Add($modeA.LatencyMs)
         L "  COL02 present at $($modeA.LatencyMs)ms: $($modeA.InstanceId)" Green
 
+        # Settle: BT HID channel needs ~2s after PnP re-enumeration before GetInputReport succeeds
+        Start-Sleep -Seconds 2
+
         # Battery probe
         $bat = Read-Battery0x90 $modeA.InstanceId
         if ($bat.Ok) {
@@ -253,18 +256,18 @@ for ($i = 1; $i -le $N; $i++) {
     }
 
     if ($i % 5 -eq 0) {
-        $ok = ($results | Where-Object { $_.ModeClass -eq 'MODE_A_REACHED' }).Count
+        $ok = @($results | Where-Object { $_.ModeClass -eq 'MODE_A_REACHED' }).Count
         L "  ── Progress $i/$N — Mode A rate: $([Math]::Round(($ok/$i)*100,1))% ($ok/$i) ──" Cyan
     }
 }
 
 # ── Aggregate ─────────────────────────────────────────────────────────────────
 $total      = $results.Count
-$modeAOk    = ($results | Where-Object { $_.ModeClass -eq 'MODE_A_REACHED' }).Count
-$modeAMiss  = ($results | Where-Object { $_.ModeClass -eq 'MODE_A_MISSED'  }).Count
-$flipFail   = ($results | Where-Object { $_.ModeClass -eq 'FLIP_FAIL'      }).Count
-$batOk      = ($results | Where-Object { $_.BatteryClass -eq 'BATTERY_READ_OK'   }).Count
-$batFail    = ($results | Where-Object { $_.BatteryClass -eq 'BATTERY_READ_FAIL'  }).Count
+$modeAOk    = @($results | Where-Object { $_.ModeClass -eq 'MODE_A_REACHED' }).Count
+$modeAMiss  = @($results | Where-Object { $_.ModeClass -eq 'MODE_A_MISSED'  }).Count
+$flipFail   = @($results | Where-Object { $_.ModeClass -eq 'FLIP_FAIL'      }).Count
+$batOk      = @($results | Where-Object { $_.BatteryClass -eq 'BATTERY_READ_OK'   }).Count
+$batFail    = @($results | Where-Object { $_.BatteryClass -eq 'BATTERY_READ_FAIL'  }).Count
 $rate       = if ($total -gt 0) { [Math]::Round(($modeAOk / $total) * 100, 1) } else { 0 }
 
 function Pct { param([System.Collections.Generic.List[int]]$L, [int]$P)
