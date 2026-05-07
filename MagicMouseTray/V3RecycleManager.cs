@@ -41,7 +41,7 @@ internal sealed class V3RecycleManager : IDisposable
     const int RetryDelayMs       = 500;
     const int MaxRetries         = 3;
     const int MaxRestoreAttempts = 3;      // FLIP:AppleFilter retries for Mode B restore
-    const int ModeAVerifyMs      = 2_000;  // poll budget for Mode A confirmation
+    const int ModeAVerifyMs      = 5_000;  // poll budget for Mode A + col02 DN_STARTED (empirical: ~16ms path + ~1000ms pipeline ready)
     const int ModeBVerifyMs      = 5_000;  // poll budget for Mode B confirmation (mouhid is slow)
     const int ConsecutiveFailCap = 3;
     const int DailyFailCap       = 10;    // >10 failures in 24h → auto-disable
@@ -118,8 +118,9 @@ internal sealed class V3RecycleManager : IDisposable
         Logger.Log($"V3RECYCLE pre-check BTHENUM healthy={btHealthy}");
         if (!btHealthy)
         {
+            // Pre-existing wedge — not caused by this manager. Do NOT count against
+            // the failure budget; SelfHealManager handles BTHENUM recovery.
             Logger.Log("V3RECYCLE pre-check: BTHENUM not DN_STARTED — skipping cycle, BT stack wedged");
-            RecordFailure("BTHENUM pre-flip not started");
             return;
         }
 
@@ -171,8 +172,15 @@ internal sealed class V3RecycleManager : IDisposable
                 if (v3 is not null)
                 {
                     deviceName = v3.DeviceName;
-                    pct = v3.GetBatteryPercent();
-                    Logger.Log($"V3RECYCLE battery read: device={deviceName} pct={pct} attempt={attempt}");
+                    // Retry within Mode A window: col02 DN_STARTED does not guarantee the
+                    // HID report pipeline is ready. Empirical: GLE=121 then GLE=21, success
+                    // at ~1000ms. 3 retries at 500ms avoids full flip-cycle retry overhead.
+                    for (int readTry = 1; readTry <= 3 && pct < 0; readTry++)
+                    {
+                        if (readTry > 1) Thread.Sleep(500);
+                        pct = v3.GetBatteryPercent();
+                        Logger.Log($"V3RECYCLE battery read: device={deviceName} pct={pct} attempt={attempt} readTry={readTry}");
+                    }
                 }
                 else
                 {
