@@ -89,6 +89,11 @@ internal static class HidNative
     [DllImport("cfgmgr32.dll")]
     static extern uint CM_Get_DevNode_Status(out uint pulStatus, out uint pulProblemNumber, uint dnDevInst, uint ulFlags);
 
+    // cfgmgr32: read a typed device property from devnode (Windows 10+)
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode, EntryPoint = "CM_Get_DevNode_PropertyW")]
+    static extern uint CM_Get_DevNode_Property(uint dnDevInst, ref DEVPROPKEY PropertyKey,
+        out uint PropertyType, [Out] byte[] PropertyBuffer, ref uint PropertyBufferSize, uint ulFlags);
+
     const uint DN_STARTED = 0x00000008; // driver start routine completed — device is running
 
     [StructLayout(LayoutKind.Sequential)]
@@ -99,6 +104,17 @@ internal static class HidNative
         public uint DevInst;
         public IntPtr Reserved;
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct DEVPROPKEY { public Guid fmtid; public uint pid; }
+
+    // DEVPKEY_Device_Stack {a45c254e-df1c-4efd-8020-67d146a850e0} pid=14
+    // STRING_LIST of drivers in the active kernel stack, populated after driver load completes.
+    static readonly DEVPROPKEY s_devpkeyStack = new()
+    {
+        fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
+        pid = 14
+    };
 
     // GUID_DEVCLASS_MOUSE — Mouse class devices created by mouhid.sys when it binds to HID device
     static readonly Guid MouseClassGuid = new("4d36e96f-e325-11ce-bfc1-08002be10318");
@@ -178,6 +194,51 @@ internal static class HidNative
 
                 CM_Get_DevNode_Status(out uint status, out _, info.DevInst, 0);
                 return (status & DN_STARTED) != 0;
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(devs); }
+        return false;
+    }
+
+    // Returns true if applewirelessmouse.sys is in the active kernel driver stack of the
+    // v3 Magic Mouse BTHENUM parent device (DEVPKEY_Device_Stack). Authoritative Mode B
+    // discriminator — only present after the filter driver loads following FLIP:AppleFilter
+    // + enable. mouhid.sys DN_STARTED (Mouse class device) stays True in Mode A and is a
+    // false positive; it must NOT be used for Mode B detection (confirmed 2026-05-07).
+    internal static bool IsApplewirelessmouseInStack()
+    {
+        const uint DIGCF_PRESENT_ALLCLASSES = 0x06;
+        const uint CR_SUCCESS = 0;
+        var devs = SetupDiGetClassDevs(IntPtr.Zero, "BTHENUM", IntPtr.Zero, DIGCF_PRESENT_ALLCLASSES);
+        if (devs == IntPtr.Zero || devs == INVALID_HANDLE_VALUE) return false;
+        try
+        {
+            uint idx = 0;
+            while (true)
+            {
+                var info = new SP_DEVINFO_DATA();
+                info.cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>();
+                if (!SetupDiEnumDeviceInfo(devs, idx++, ref info)) break;
+
+                var idBuf = new StringBuilder(512);
+                if (CM_Get_Device_ID(info.DevInst, idBuf, (uint)idBuf.Capacity, 0) != 0) continue;
+                var id = idBuf.ToString().ToLowerInvariant();
+
+                if (!id.Contains("00001124")) continue;
+                if (!((id.Contains("0001004c") && id.Contains("0323")) ||
+                      (id.Contains("vid_05ac") && id.Contains("pid_0323"))))
+                    continue;
+
+                var key = s_devpkeyStack;
+                uint bufSize = 4096;
+                var buf = new byte[bufSize];
+                if (CM_Get_DevNode_Property(info.DevInst, ref key, out _, buf, ref bufSize, 0) != CR_SUCCESS)
+                    return false;
+
+                // DEVPROP_TYPE_STRING_LIST: UTF-16 entries separated by null chars
+                var raw = Encoding.Unicode.GetString(buf, 0, (int)bufSize);
+                return raw.Split('\0', StringSplitOptions.RemoveEmptyEntries)
+                          .Any(e => e.IndexOf("applewireless", StringComparison.OrdinalIgnoreCase) >= 0);
             }
         }
         finally { SetupDiDestroyDeviceInfoList(devs); }

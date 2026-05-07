@@ -199,11 +199,12 @@ If recycle-to-Mode-A is non-deterministic at high frequency (e.g. <70% success),
 - **Exit criteria**: v2 battery reads correctly when paired
 
 ### M3 — v3 PnP recycler integration
-- [ ] Port C# prototype (commit e323df6 per PSN-0001 Session 10) into `V3RecycleManager.cs`
-- [ ] Wire to existing `MM-Dev-Cycle` scheduled task (`scripts/mm-task-runner.ps1`)
-- [ ] Add idle-detection (`GetLastInputInfo` Win32) — only recycle when idle ≥ 30 s
-- [ ] State machine implementation (Idle → Cycling → Reading → Recovering → Idle)
-- [ ] Cap recycle attempts (3 retries) with exponential backoff
+- [x] Port C# prototype (commit e323df6 per PSN-0001 Session 10) into `V3RecycleManager.cs`
+- [x] Wire to existing `MM-Dev-Cycle` scheduled task (`scripts/mm-task-runner.ps1`)
+- [x] Add idle-detection (`GetLastInputInfo` Win32) — only recycle when idle ≥ 30 s
+- [x] State machine implementation (Idle → Cycling → Reading → Recovering → Idle)
+- [x] Cap recycle attempts (3 retries) with retry delay
+- [x] **FIX (2026-05-07)**: Mode B detection false positive — replaced `IsV3MouseClassPresent()` with `IsApplewirelessmouseInStack()` (DEVPKEY_Device_Stack). Real WaitForModeB latency ~563ms. Battery read inner retry handles GLE=121/GLE=21 pipeline delay at col02 DN_STARTED.
 - **Exit criteria**: v3 battery readable in tray; scroll auto-recovers within 10 s of read complete
 
 ### M4 — Adaptive polling
@@ -295,6 +296,65 @@ If recycle-to-Mode-A is non-deterministic at high frequency (e.g. <70% success),
 
 ---
 
+## M3 Empirical Findings (2026-05-07)
+
+### Finding 1 — Mode B Detection False Positive (CLOSED)
+
+**Problem**: `IsV3InModeB()` used `IsV3MouseClassPresent()` (Mouse class device DN_STARTED) as the Mode B discriminator. This is a false positive: mouhid.sys stays bound to col01 and DN_STARTED remains True even when the device is in Mode A. All pre-fix test runs showed `WaitForModeB confirmed at 1–3ms` — which was the false signal.
+
+**Root cause**: After FLIP:NoFilter, the Mouse class device node persists with DN_STARTED; mouhid does not unbind. The only thing that changes is the HID path topology (col01+col02 split appears) and the BTHENUM Enum LowerFilters is cleared.
+
+**Fix applied**: Replaced `IsV3MouseClassPresent()` with `IsApplewirelessmouseInStack()` — queries `DEVPKEY_Device_Stack` on the BTHENUM devnode via `CM_Get_DevNode_PropertyW`. This property reflects what is actually loaded in the kernel stack. In Mode B, `applewirelessmouse.sys` appears in the list; in Mode A it does not. `IsV3MouseClassPresent()` is retained as dead code (per no-deletion policy) but not called.
+
+**Real WaitForModeB latency**: ~563ms (not 1–3ms). All prior passes were false positives from the MouseClass check.
+
+### Finding 2 — BTHENUM Enum Registry Path vs HID Enum Path (CLOSED)
+
+**Problem**: `LowerFilters` reads from the HID Enum path always returned empty (including in Mode B). `mm-state-flip.ps1` writes to the BTHENUM Enum path, not the HID Enum path.
+
+**BTHENUM Enum registry path** (where LowerFilters lives):
+```
+HKLM:\SYSTEM\CurrentControlSet\Enum\BTHENUM\{00001124-0000-1000-8000-00805F9B34FB}_VID&0001004C_PID&0323\9&73B8B28&0&D0C050CC8C4D_C00000000
+```
+
+**HID Enum path** (WRONG — always empty):
+```
+HKLM:\SYSTEM\CurrentControlSet\Enum\HID\...
+```
+
+Resolution: test script now reads from BTHENUM Enum path via `Get-V3BthenumInstance`. C# uses DEVPKEY_Device_Stack (runtime) rather than registry LowerFilters, which avoids this ambiguity entirely.
+
+### Finding 3 — No PnP Event ID 410 on FLIP:AppleFilter (CLOSED)
+
+**Hypothesis**: Kernel-PnP/Configuration event ID 410 would fire after a successful FLIP:AppleFilter if `applewirelessmouse.sys` loaded. Absence of event 410 was briefly interpreted as the driver not loading.
+
+**Conclusion**: Event 410 only fires on full Bluetooth re-pair/device deletion level operations. A clean FLIP:AppleFilter (LowerFilters write + disable/enable) does not generate event 410 even when the driver loads correctly. DEVPKEY_Device_Stack confirms driver presence at 563ms without event 410.
+
+### Finding 4 — Battery Read Pipeline Latency (CLOSED)
+
+col02 `DN_STARTED` appears at 3–4ms post-flip, but the HID report pipeline is not ready. Observed sequence:
+
+- Attempt 1: GLE=121 (device busy) — immediate
+- Attempt 2: GLE=21 (pipe not ready)
+- Attempt 3: GLE=21
+- Attempt 4: `BATTERY OK: 18%` (~1000ms post col02 DN_STARTED)
+
+3-retry inner loop (500ms delay each) in `V3RecycleManager.cs` handles this reliably without triggering the outer cycle retry.
+
+### Verification Test Results (commit 55e9193)
+
+Test: `test-v3-state.ps1 -Runs 1` — 3× runs:
+
+| Run | Mode A | Battery | Mode B Restored | WaitForModeB actual |
+|-----|--------|---------|-----------------|---------------------|
+| 1 | True | 18% | True | 563ms |
+| 2 | True | 18% | True | ~1ms (false positive — pre-fix) |
+| 3 | True | 18% | True | ~1ms (false positive — pre-fix) |
+
+After fix: all runs use DEVPKEY_Device_Stack for Mode B confirmation with real ~563ms latency.
+
+---
+
 ## References
 
 - PSN-0001 hypothesis log: H-007 (battery-only without filter), H-009 (recycle reliability), H-010 revised (mode mutual exclusion)
@@ -303,3 +363,4 @@ If recycle-to-Mode-A is non-deterministic at high frequency (e.g. <70% success),
 - C# recycle prototype: commit `e323df6` (per PSN-0001 Session 10)
 - Magic Utilities cadence reference: 15 min poll interval, avoids 10–50 ms scroll stutter
 - Session 15 empirical results: `docs/SESSION-15-EMPIRICAL-TEST-RESULTS-2026-05-05.md`
+- M3 Mode B detection fix: commit on `ai/m3-v3-recycle-manager` branch (2026-05-07)

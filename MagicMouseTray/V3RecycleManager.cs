@@ -259,7 +259,8 @@ internal sealed class V3RecycleManager : IDisposable
         return false;
     }
 
-    // Polls until the v3 unified path appears (no col0x) and mouhid has bound (Mode B).
+    // Polls until the v3 unified path appears (no col0x) and applewirelessmouse.sys is
+    // in the kernel stack (Mode B). Empirical P95 latency: ~563ms (2026-05-07).
     // Returns true if Mode B confirmed within timeoutMs.
     static bool WaitForModeB(int timeoutMs)
     {
@@ -279,10 +280,12 @@ internal sealed class V3RecycleManager : IDisposable
             p.Contains("col02", StringComparison.OrdinalIgnoreCase));
 
     // True if a v3 Magic Mouse is in Mode B: unified HID path exists (no col0x splits)
-    // AND mouhid.sys has bound (confirmed via Mouse class device enumeration).
-    // mouhid creates a Mouse class device node only after successful binding — this is the
-    // definitive signal that cursor input is restored. CreateFile(0) fires at PnP enumeration
-    // time, which precedes mouhid binding by 0–2s and is NOT a reliable proxy (2026-05-06).
+    // AND applewirelessmouse.sys is in the active kernel stack (DEVPKEY_Device_Stack).
+    // DEVPKEY_Device_Stack is the authoritative Mode B discriminator — the entry only
+    // appears after the filter driver loads following FLIP:AppleFilter + enable.
+    // mouhid.sys DN_STARTED (Mouse class device) is a false positive in Mode A: mouhid
+    // stays bound to col01 and DN_STARTED remains True even when the device is in Mode A.
+    // Empirical: real WaitForModeB latency ~563ms (confirmed 2026-05-07).
     static bool IsV3InModeB()
     {
         var v3Paths = HidNative.EnumerateHidPaths()
@@ -295,8 +298,8 @@ internal sealed class V3RecycleManager : IDisposable
         if (v3Paths.Any(p => p.Contains("&col0", StringComparison.OrdinalIgnoreCase)))
             return false;
 
-        // Confirm mouhid has bound: Mouse class device with v3 parent exists in device tree
-        return HidNative.IsV3MouseClassPresent();
+        // Confirm applewirelessmouse.sys is in the active kernel stack
+        return HidNative.IsApplewirelessmouseInStack();
     }
 
     // True if the HID device path belongs to a Magic Mouse v3 (BT or USB).

@@ -203,7 +203,7 @@ on zero devices (default initialization bug from adversarial review).
 | Test ID | Component | Test Case | Command | Pass Criteria |
 |---------|-----------|-----------|---------|---------------|
 | T2-01 | Driver install | applewirelessmouse package installed | `pnputil /enum-drivers \| Select-String applewireless` | OEM slot visible with correct provider |
-| T2-02 | Driver binding | LowerFilters set on BTHENUM device | `Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Enum\BTHENUM\...\9&..." \| Select LowerFilters` | Value = `applewirelessmouse` |
+| T2-02 | Driver binding | LowerFilters set on BTHENUM Enum key | `(Get-PnpDevice -Class HIDClass \| Where-Object { $_.InstanceId -imatch '00001124.*0001004C.*0323' }).InstanceId \| ForEach-Object { (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Enum\$_").LowerFilters }` | Value = `applewirelessmouse`. **Note**: reads BTHENUM Enum key, NOT HID Enum key — only the BTHENUM key has LowerFilters |
 | T2-03 | HID enumeration | COL01 and COL02 both Status OK | `Get-PnpDevice \| Where-Object { $_.InstanceId -match "0323" -and $_.Status -eq "OK" }` | Count = 2 |
 | T2-04 | Scheduled task | `MagicMouseTray-StartupRepair` registered | `Get-ScheduledTask -TaskName MagicMouseTray-StartupRepair` | Task exists, trigger = AtStartup, delay = PT30S, principal = SYSTEM |
 | T2-05 | Cert trust | MagicMouseFix in TrustedPublisher | `Get-ChildItem Cert:\LocalMachine\TrustedPublisher \| Where Subject -match MagicMouseFix` | Certificate present |
@@ -286,6 +286,42 @@ Same as T4-B but with Magic Mouse v1. Substitute PID 030d in all verification st
 **Note**: MM-V1 uses a different HID descriptor than MM-V3. Confirm startup-repair.ps1 detects
 the correct BTHENUM parent for PID 030d and that `MouseBatteryReader` matches the correct
 KnownMice entry.
+
+---
+
+## Tier 5 — V3RecycleManager Tests (M3)
+
+**Scope**: End-to-end recycle cycle validation — Mode B→A flip, battery read, Mode A→B restore.
+**Prerequisite**: Mouse paired and in Mode B (scroll works, battery not showing). MM-Dev-Cycle scheduled task active.
+**Test script**: `C:\mm-dev-queue\test-v3-state.ps1` (run as Administrator).
+
+### Mode B Detection Signals (authoritative, 2026-05-07)
+
+| Signal | Mode A | Mode B | Source |
+|--------|--------|--------|--------|
+| HID paths | col01 + col02 (split) | unified (no col suffix) | `Get-PnpDeviceInterface` |
+| LowerFilters (BTHENUM Enum key) | `(empty)` | `applewirelessmouse` | Registry: `HKLM:\...\Enum\BTHENUM\{00001124...}_VID&0001004C_PID&0323\9&...` |
+| DEVPKEY_Device_Stack | no `applewireless` entry | `applewireless` in list | `Get-PnpDeviceProperty -KeyName DEVPKEY_Device_Stack` |
+| MouseClass DN_STARTED | **True (false positive)** | True | NOT a discriminator — mouhid stays bound to col01 in Mode A |
+| Scroll | broken | works | Physical test |
+| Battery (RID=0x90 on col02) | readable | N/A (col02 not present) | `HidD_GetInputReport` |
+
+**MouseClass DN_STARTED must NOT be used as a Mode B indicator** — confirmed false positive 2026-05-07.
+
+### T5 Test Cases
+
+| Test ID | Test Case | Command | Pass Criteria |
+|---------|-----------|---------|---------------|
+| T5-01 | State check: device in Mode B | `.\test-v3-state.ps1 -StateCheckOnly` | Output: `State: MODE B` + `FilterInStack=True` + `LowerFilters=applewirelessmouse` |
+| T5-02 | Single recycle cycle (FLIP:NoFilter → Mode A → battery → FLIP:AppleFilter → Mode B) | `.\test-v3-state.ps1 -Runs 1` | `PASS: ModeA=True Battery=NN% Restored=True` |
+| T5-03 | Mode A confirmed via HID paths | Inspect T5-02 output | Two col paths visible: `...col01...` + `...col02...` in Mode A |
+| T5-04 | Mode B restored via DEVPKEY_Device_Stack | Inspect T5-02 output | `FilterInStack=True` in post-restore checkpoint |
+| T5-05 | WaitForModeB latency within budget | Inspect T5-02 timing | `[ModeB] confirmed at Nms` where N is 400–800ms |
+| T5-06 | Battery pipeline retry handled | Inspect T5-02 output | If GLE=121/GLE=21 on attempts 1-2, passes on attempt 3 or 4. No outer cycle retry triggered. |
+| T5-07 | BTHENUM parent healthy pre-flip | Inspect T5-02 output | `IsV3BtStackHealthy=True` in baseline |
+| T5-08 | No degradation after 1 cycle | Run mouse scroll after T5-02 | Scroll works normally post-restore |
+
+**Note**: Run T5 as a single cycle (`-Runs 1`) only. Multiple rapid cycles risk BT stack drift requiring re-pair.
 
 ---
 
