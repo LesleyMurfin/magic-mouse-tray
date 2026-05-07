@@ -66,6 +66,14 @@ internal static class HidNative
         uint DeviceInterfaceDetailDataSize, out uint RequiredSize,
         IntPtr DeviceInfoData);
 
+    // Overload: captures SP_DEVINFO_DATA (devnode) alongside the interface detail
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    static extern bool SetupDiGetDeviceInterfaceDetail(IntPtr DeviceInfoSet,
+        ref SP_DEVICE_INTERFACE_DATA DeviceInterfaceData,
+        ref SP_DEVICE_INTERFACE_DETAIL_DATA DeviceInterfaceDetailData,
+        uint DeviceInterfaceDetailDataSize, out uint RequiredSize,
+        ref SP_DEVINFO_DATA DeviceInfoData);
+
     [DllImport("setupapi.dll")]
     internal static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
 
@@ -160,11 +168,57 @@ internal static class HidNative
                 if (CM_Get_Device_ID(info.DevInst, idBuf, (uint)idBuf.Capacity, 0) != 0) continue;
                 var id = idBuf.ToString().ToLowerInvariant();
 
+                // Require HID service UUID {00001124} — avoids matching Generic Access
+                // Profile {00001200} or other BTHENUM-enumerated profiles on the same device.
+                if (!id.Contains("00001124")) continue;
+
                 if (!((id.Contains("0001004c") && id.Contains("0323")) ||
                       (id.Contains("vid_05ac") && id.Contains("pid_0323"))))
                     continue;
 
                 CM_Get_DevNode_Status(out uint status, out _, info.DevInst, 0);
+                return (status & DN_STARTED) != 0;
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(devs); }
+        return false;
+    }
+
+    // Returns true if the v3 col02 HID interface path exists AND its devnode has DN_STARTED.
+    // col02 appearing in HID enumeration precedes HID class driver initialisation —
+    // DN_STARTED is the empirical proof the stack is ready for HidD_GetInputReport.
+    internal static bool IsV3Col02Ready()
+    {
+        var guid = HidGuid;
+        var devs = SetupDiGetClassDevs(ref guid, null, IntPtr.Zero,
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        if (devs == IntPtr.Zero || devs == INVALID_HANDLE_VALUE) return false;
+        try
+        {
+            uint index = 0;
+            while (true)
+            {
+                var iface = new SP_DEVICE_INTERFACE_DATA();
+                iface.cbSize = (uint)Marshal.SizeOf<SP_DEVICE_INTERFACE_DATA>();
+                if (!SetupDiEnumDeviceInterfaces(devs, IntPtr.Zero, ref guid, index++, ref iface))
+                    break;
+
+                var detail = new SP_DEVICE_INTERFACE_DETAIL_DATA();
+                detail.cbSize = IntPtr.Size == 8 ? 8u : 6u;
+                var devInfo = new SP_DEVINFO_DATA();
+                devInfo.cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>();
+                SetupDiGetDeviceInterfaceDetail(devs, ref iface, ref detail, 512, out _, ref devInfo);
+
+                if (string.IsNullOrEmpty(detail.DevicePath)) continue;
+                var p = detail.DevicePath;
+                if (!p.Contains("col02", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!((p.Contains("0001004c", StringComparison.OrdinalIgnoreCase) &&
+                       p.Contains("pid&0323", StringComparison.OrdinalIgnoreCase)) ||
+                      (p.Contains("vid_05ac", StringComparison.OrdinalIgnoreCase) &&
+                       p.Contains("pid_0323", StringComparison.OrdinalIgnoreCase))))
+                    continue;
+
+                CM_Get_DevNode_Status(out uint status, out _, devInfo.DevInst, 0);
                 return (status & DN_STARTED) != 0;
             }
         }

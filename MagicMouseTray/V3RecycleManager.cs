@@ -237,14 +237,15 @@ internal sealed class V3RecycleManager : IDisposable
         return false;
     }
 
-    // Polls until a v3 col02 path appears (Mode A / split descriptor active).
-    // Returns true if Mode A confirmed within timeoutMs.
+    // Polls until v3 col02 path exists AND its devnode has DN_STARTED.
+    // col02 appears in HID enumeration before the HID class driver finishes initialising
+    // the device — DN_STARTED is the empirical proof the stack is ready for GetInputReport.
     static bool WaitForModeA(int timeoutMs)
     {
         var deadline = Environment.TickCount64 + timeoutMs;
         do
         {
-            if (IsV3InModeA()) return true;
+            if (HidNative.IsV3Col02Ready()) return true;
             Thread.Sleep(100);
         } while (Environment.TickCount64 < deadline);
         return false;
