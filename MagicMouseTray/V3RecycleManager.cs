@@ -238,36 +238,16 @@ internal sealed class V3RecycleManager : IDisposable
         return false;
     }
 
-    // Polls until v3 is in Mode B (unified HID path + fresh mouhid bind). Two-phase:
-    // if a Mouse class device is present at entry (stale from a prior PnP cycle), waits
-    // for PnP disable to remove it before accepting any Mouse class presence as a fresh bind.
-    // Prevents false-positive when Mouse class from the previous cycle outlasts the NoFilter flip.
+    // Polls until the v3 unified path appears (no col0x) and mouhid has bound (Mode B).
+    // Returns true if Mode B confirmed within timeoutMs.
     static bool WaitForModeB(int timeoutMs)
     {
         var deadline = Environment.TickCount64 + timeoutMs;
-
-        // Phase 1: stale Mouse class present → wait for PnP disable to clear it.
-        bool purgingStale = HidNative.IsV3MouseClassPresent();
-        if (purgingStale)
-            Logger.Log("V3RECYCLE WaitForModeB: stale Mouse class at entry — waiting for PnP disable to clear");
-
         do
         {
-            if (purgingStale)
-            {
-                if (!HidNative.IsV3MouseClassPresent())
-                {
-                    purgingStale = false;
-                    Logger.Log("V3RECYCLE WaitForModeB: stale cleared — waiting for fresh mouhid bind");
-                }
-            }
-            else if (IsV3InModeB())
-            {
-                return true;
-            }
+            if (IsV3InModeB()) return true;
             Thread.Sleep(100);
         } while (Environment.TickCount64 < deadline);
-
         return false;
     }
 
