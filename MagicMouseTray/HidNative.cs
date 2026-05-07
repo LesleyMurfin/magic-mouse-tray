@@ -1,18 +1,24 @@
 // P/Invoke declarations for HID and SetupDi APIs shared across all device readers.
 using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 
 namespace MagicMouseTray;
 
 internal static class HidNative
 {
-    internal const uint FILE_SHARE_READ    = 0x00000001;
-    internal const uint FILE_SHARE_WRITE   = 0x00000002;
-    internal const uint OPEN_EXISTING      = 3;
-    internal const uint DIGCF_PRESENT      = 0x02;
+    internal const uint FILE_SHARE_READ       = 0x00000001;
+    internal const uint FILE_SHARE_WRITE      = 0x00000002;
+    internal const uint OPEN_EXISTING         = 3;
+    internal const uint DIGCF_PRESENT         = 0x02;
     internal const uint DIGCF_DEVICEINTERFACE = 0x10;
-    internal const int  HIDP_STATUS_SUCCESS = 0x00110000;
+    internal const int  HIDP_STATUS_SUCCESS   = 0x00110000;
+    internal const uint GENERIC_READ          = 0x80000000u;
+    internal const uint FILE_FLAG_OVERLAPPED  = 0x40000000u;
+    internal const uint WAIT_OBJECT_0         = 0;
+    internal const uint ERROR_IO_PENDING      = 997;
+    internal const uint ERROR_DEVICE_NOT_CONNECTED = 1167;
     internal static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
 
     internal static readonly Guid HidGuid = new("4d1e55b2-f16f-11cf-88cb-001111000030");
@@ -21,6 +27,28 @@ internal static class HidNative
     internal static extern SafeFileHandle CreateFile(string lpFileName, uint dwDesiredAccess,
         uint dwShareMode, IntPtr lpSecurityAttributes, uint dwCreationDisposition,
         uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+    // Overlapped ReadFile — lpNumberOfBytesRead must be IntPtr.Zero when lpOverlapped is used.
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern bool ReadFile(SafeFileHandle hFile, byte[] lpBuffer,
+        uint nNumberOfBytesToRead, IntPtr lpNumberOfBytesRead, ref OVERLAPPED lpOverlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern bool GetOverlappedResult(SafeFileHandle hFile,
+        ref OVERLAPPED lpOverlapped, out uint lpNumberOfBytesTransferred, bool bWait);
+
+    [DllImport("kernel32.dll")]
+    internal static extern IntPtr CreateEvent(IntPtr lpEventAttributes, bool bManualReset,
+        bool bInitialState, IntPtr lpName);
+
+    [DllImport("kernel32.dll")]
+    internal static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+    [DllImport("kernel32.dll")]
+    internal static extern bool CancelIo(SafeFileHandle hFile);
+
+    [DllImport("kernel32.dll")]
+    internal static extern bool CloseHandle(IntPtr hObject);
 
     [DllImport("hid.dll", SetLastError = true)]
     internal static extern bool HidD_GetInputReport(SafeFileHandle HidDeviceObject,
@@ -89,11 +117,6 @@ internal static class HidNative
     [DllImport("cfgmgr32.dll")]
     static extern uint CM_Get_DevNode_Status(out uint pulStatus, out uint pulProblemNumber, uint dnDevInst, uint ulFlags);
 
-    // cfgmgr32: read a typed device property from devnode (Windows 10+)
-    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode, EntryPoint = "CM_Get_DevNode_PropertyW")]
-    static extern uint CM_Get_DevNode_Property(uint dnDevInst, ref DEVPROPKEY PropertyKey,
-        out uint PropertyType, [Out] byte[] PropertyBuffer, ref uint PropertyBufferSize, uint ulFlags);
-
     const uint DN_STARTED = 0x00000008; // driver start routine completed — device is running
 
     [StructLayout(LayoutKind.Sequential)]
@@ -104,17 +127,6 @@ internal static class HidNative
         public uint DevInst;
         public IntPtr Reserved;
     }
-
-    [StructLayout(LayoutKind.Sequential)]
-    struct DEVPROPKEY { public Guid fmtid; public uint pid; }
-
-    // DEVPKEY_Device_Stack {a45c254e-df1c-4efd-8020-67d146a850e0} pid=14
-    // STRING_LIST of drivers in the active kernel stack, populated after driver load completes.
-    static readonly DEVPROPKEY s_devpkeyStack = new()
-    {
-        fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
-        pid = 14
-    };
 
     // GUID_DEVCLASS_MOUSE — Mouse class devices created by mouhid.sys when it binds to HID device
     static readonly Guid MouseClassGuid = new("4d36e96f-e325-11ce-bfc1-08002be10318");
@@ -200,48 +212,41 @@ internal static class HidNative
         return false;
     }
 
-    // Returns true if applewirelessmouse.sys is in the active kernel driver stack of the
-    // v3 Magic Mouse BTHENUM parent device (DEVPKEY_Device_Stack). Authoritative Mode B
-    // discriminator — only present after the filter driver loads following FLIP:AppleFilter
-    // + enable. mouhid.sys DN_STARTED (Mouse class device) stays True in Mode A and is a
-    // false positive; it must NOT be used for Mode B detection (confirmed 2026-05-07).
+    // Returns true if applewirelessmouse is in LowerFilters for the v3 Magic Mouse BTHENUM
+    // devnode. Reads directly from the registry — no SetupDi device enumeration, no DIGCF_PRESENT
+    // dependency. LowerFilters is written by FLIP:AppleFilter BEFORE disable+enable, so it is
+    // readable immediately after FLIP:AppleFilter exits, regardless of PnP device presence state.
+    // This is the authoritative Mode B discriminator (confirmed 2026-05-07).
     internal static bool IsApplewirelessmouseInStack()
     {
-        const uint DIGCF_PRESENT_ALLCLASSES = 0x06;
-        const uint CR_SUCCESS = 0;
-        var devs = SetupDiGetClassDevs(IntPtr.Zero, "BTHENUM", IntPtr.Zero, DIGCF_PRESENT_ALLCLASSES);
-        if (devs == IntPtr.Zero || devs == INVALID_HANDLE_VALUE) return false;
         try
         {
-            uint idx = 0;
-            while (true)
+            using var bthEnum = Registry.LocalMachine.OpenSubKey(
+                @"SYSTEM\CurrentControlSet\Enum\BTHENUM");
+            if (bthEnum is null) return false;
+
+            foreach (var devIdName in bthEnum.GetSubKeyNames())
             {
-                var info = new SP_DEVINFO_DATA();
-                info.cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>();
-                if (!SetupDiEnumDeviceInfo(devs, idx++, ref info)) break;
+                // Match HID service UUID {00001124} + Apple VID 004C PID 0323
+                if (!devIdName.Contains("00001124", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!devIdName.Contains("0001004C", StringComparison.OrdinalIgnoreCase) &&
+                    !devIdName.Contains("VID_05AC", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!devIdName.Contains("0323", StringComparison.OrdinalIgnoreCase)) continue;
 
-                var idBuf = new StringBuilder(512);
-                if (CM_Get_Device_ID(info.DevInst, idBuf, (uint)idBuf.Capacity, 0) != 0) continue;
-                var id = idBuf.ToString().ToLowerInvariant();
+                using var devIdKey = bthEnum.OpenSubKey(devIdName);
+                if (devIdKey is null) continue;
 
-                if (!id.Contains("00001124")) continue;
-                if (!((id.Contains("0001004c") && id.Contains("0323")) ||
-                      (id.Contains("vid_05ac") && id.Contains("pid_0323"))))
-                    continue;
-
-                var key = s_devpkeyStack;
-                uint bufSize = 4096;
-                var buf = new byte[bufSize];
-                if (CM_Get_DevNode_Property(info.DevInst, ref key, out _, buf, ref bufSize, 0) != CR_SUCCESS)
-                    return false;
-
-                // DEVPROP_TYPE_STRING_LIST: UTF-16 entries separated by null chars
-                var raw = Encoding.Unicode.GetString(buf, 0, (int)bufSize);
-                return raw.Split('\0', StringSplitOptions.RemoveEmptyEntries)
-                          .Any(e => e.IndexOf("applewireless", StringComparison.OrdinalIgnoreCase) >= 0);
+                foreach (var instName in devIdKey.GetSubKeyNames())
+                {
+                    using var instKey = devIdKey.OpenSubKey(instName);
+                    if (instKey is null) continue;
+                    if (instKey.GetValue("LowerFilters") is string[] lf &&
+                        lf.Any(f => f.IndexOf("applewireless", StringComparison.OrdinalIgnoreCase) >= 0))
+                        return true;
+                }
             }
         }
-        finally { SetupDiDestroyDeviceInfoList(devs); }
+        catch { }
         return false;
     }
 
@@ -358,6 +363,17 @@ internal static class HidNative
         public ushort NumberFeatureButtonCaps;
         public ushort NumberFeatureValueCaps;
         public ushort NumberFeatureDataIndices;
+    }
+
+    // Must match Windows OVERLAPPED exactly: ULONG_PTR fields = 8 bytes on x64 (total 32 bytes).
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct OVERLAPPED
+    {
+        public UIntPtr Internal;
+        public UIntPtr InternalHigh;
+        public uint Offset;
+        public uint OffsetHigh;
+        public IntPtr hEvent;
     }
 
     // Layout matches hidpi.h (Pack=4, 96 bytes on x64). Only IsRange=false fields used.

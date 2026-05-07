@@ -201,18 +201,22 @@ If recycle-to-Mode-A is non-deterministic at high frequency (e.g. <70% success),
 ### M3 — v3 PnP recycler integration
 - [x] Port C# prototype (commit e323df6 per PSN-0001 Session 10) into `V3RecycleManager.cs`
 - [x] Wire to existing `MM-Dev-Cycle` scheduled task (`scripts/mm-task-runner.ps1`)
-- [x] Add idle-detection (`GetLastInputInfo` Win32) — only recycle when idle ≥ 30 s
+- [x] Add idle-detection (cursor-position polling replaces `GetLastInputInfo` — system-wide input events blocked it) — only recycle when idle ≥ 30 s
 - [x] State machine implementation (Idle → Cycling → Reading → Recovering → Idle)
 - [x] Cap recycle attempts (3 retries) with retry delay
-- [x] **FIX (2026-05-07)**: Mode B detection false positive — replaced `IsV3MouseClassPresent()` with `IsApplewirelessmouseInStack()` (DEVPKEY_Device_Stack). Real WaitForModeB latency ~563ms. Battery read inner retry handles GLE=121/GLE=21 pipeline delay at col02 DN_STARTED.
-- **Exit criteria**: v3 battery readable in tray; scroll auto-recovers within 10 s of read complete
+- [x] **FIX (2026-05-07 Session 17)**: Mode B detection false positive — replaced `IsV3MouseClassPresent()` with `IsApplewirelessmouseInStack()` (DEVPKEY_Device_Stack). Real WaitForModeB latency ~563ms. Battery read inner retry handles GLE=121/GLE=21 pipeline delay at col02 DN_STARTED.
+- [x] **FIX (2026-05-07 Session 18)**: Col02 path targeting — `V3RecycleManager` now explicitly filters for col02 path by name, bypassing `DeviceRegistry.Discover()` which returns col01 first (H-022). Registry-based Mode B confirmation via `Microsoft.Win32.Registry` replaces SetupDi approach (H-023).
+- [x] **ForceReadNow** menu item added — bypasses idle wait for on-demand battery read
+- [x] **CONFIRMED WORKING**: V3RECYCLE cycle SUCCESS pct=16 confirmed 2026-05-07 14:34:06. End-to-end PATH-B pipeline operational.
+- **Exit criteria**: PASSED — v3 battery readable in tray (pct=16); scroll auto-recovers within 10 s of read complete
 
 ### M4 — Adaptive polling
-- [ ] Per-device interval tracking
-- [ ] Default 15 min cadence (per research-findings.md guidance)
-- [ ] Reduce to 5 min when battery <20%
+- [ ] Per-device interval tracking via `DrainRateTracker` (per-device drain rate estimation implemented in Session 18)
+- [ ] Cadence specification:
+  - ≥20%: 24 hours
+  - <20%: rate-based — `hoursToThreshold / 3` (floor 5 min) using observed drain rate from `DrainRateTracker`; fallback formula `3h × 2^((pct-20)/10)` when drain rate not yet established
+- [ ] Manual "Refresh now" command in tray (ForceReadNow implemented in M3)
 - [ ] Increase to 60 min when battery >80% AND on AC (pass-through; not relevant for BT mice)
-- [ ] Manual "Refresh now" command in tray
 - **Exit criteria**: cadence correctly auto-adjusts, no thrash on boundaries
 
 ### M5 — Telemetry + observability

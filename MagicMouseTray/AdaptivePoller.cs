@@ -1,22 +1,29 @@
 // SPDX-License-Identifier: MIT
 namespace MagicMouseTray;
 
-// Polls all discovered Apple HID battery devices at adaptive intervals.
-// Tiers: >50%=2h  |  20-50%=30m  |  10-20%=10m  |  <10% or disconnected=5m
+// Polls all discovered Apple HID battery devices at adaptive intervals driven by
+// DrainRateTracker. Records each reading into DrainRateTracker so subsequent
+// intervals reflect the observed drain rate.
 //
 // BatteryChanged is raised from a thread-pool thread — callers must marshal
 // to the UI thread before touching WPF/NotifyIcon objects (done in TrayApp).
 //
-// Interval is driven by the lowest battery level across all discovered devices.
-// pct=-1 (no devices) falls into the <10 tier — recheck frequently.
+// v3 Magic Mouse in Mode B returns pct=-2 (unreadable) — not recorded into
+// DrainRateTracker; V3RecycleManager owns v3 drain tracking.
 internal sealed class AdaptivePoller : IDisposable
 {
     // Fired once per discovered device per poll cycle.
     // percent sentinel values: -1=not found/disconnected, -2=present but unreadable (Mode B).
     internal event Action<int, string>? BatteryChanged;
 
+    // Last computed interval — readable by TrayApp for tooltip.
+    internal TimeSpan LastInterval { get; private set; } = TimeSpan.FromMinutes(5);
+
+    readonly Config _config;
     CancellationTokenSource _cts = new();
     Task? _pollTask;
+
+    internal AdaptivePoller(Config config) => _config = config;
 
     internal void Start() => _pollTask = PollLoop(_cts.Token);
 
@@ -43,9 +50,10 @@ internal sealed class AdaptivePoller : IDisposable
             var devices = DeviceRegistry.Discover();
 
             int lowestPct = -1;
+            string lowestDevice = string.Empty;
+
             if (devices.Count == 0)
             {
-                // No devices — fire a single synthetic event so callers can clear state
                 BatteryChanged?.Invoke(-1, string.Empty);
             }
             else
@@ -54,26 +62,33 @@ internal sealed class AdaptivePoller : IDisposable
                 {
                     int pct = device.GetBatteryPercent();
                     BatteryChanged?.Invoke(pct, device.DeviceName);
-                    if (pct >= 0 && (lowestPct < 0 || pct < lowestPct))
-                        lowestPct = pct;
+
+                    if (pct >= 0)
+                    {
+                        // Record into drain tracker (skip v3 Mode-B -2 and -1 failures)
+                        DrainRateTracker.Record(device.DeviceName, pct);
+
+                        if (lowestPct < 0 || pct < lowestPct)
+                        {
+                            lowestPct = pct;
+                            lowestDevice = device.DeviceName;
+                        }
+                    }
                 }
             }
 
-            var interval = GetInterval(lowestPct);
+            // Interval driven by the lowest readable device (non-v3 path — v3 cadence
+            // is owned by V3RecycleManager). Use DrainRateTracker for non-v3 devices.
+            var lowestIsV3 = devices.FirstOrDefault(d => d.DeviceName == lowestDevice)
+                                     ?.Kind == DeviceKind.MagicMouseV3;
+            var interval = DrainRateTracker.GetNextInterval(
+                lowestDevice, lowestPct, _config.Threshold, lowestIsV3);
+            LastInterval = interval;
+
             Logger.Log($"POLL_SCHEDULED devices={devices.Count} lowest_pct={lowestPct} next_in={interval}");
 
             try { await Task.Delay(interval, ct); }
             catch (TaskCanceledException) { break; }
         }
     }
-
-    // Returns the polling interval based on the lowest battery level across all devices.
-    // lowestPct=-1 (no devices or all unreadable) → recheck frequently.
-    internal static TimeSpan GetInterval(int lowestPct) => lowestPct switch
-    {
-        > 50  => TimeSpan.FromHours(2),
-        >= 20 => TimeSpan.FromMinutes(30),
-        >= 10 => TimeSpan.FromMinutes(10),
-        _     => TimeSpan.FromMinutes(5),
-    };
 }
