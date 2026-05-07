@@ -49,6 +49,11 @@ internal static class HidNative
     internal static extern IntPtr SetupDiGetClassDevs(ref Guid ClassGuid, string? Enumerator,
         IntPtr hwndParent, uint Flags);
 
+    // Overload: null ClassGuid with enumerator string (DIGCF_ALLCLASSES required)
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern IntPtr SetupDiGetClassDevs(IntPtr ClassGuid, string Enumerator,
+        IntPtr hwndParent, uint Flags);
+
     [DllImport("setupapi.dll", SetLastError = true)]
     internal static extern bool SetupDiEnumDeviceInterfaces(IntPtr DeviceInfoSet,
         IntPtr DeviceInfoData, ref Guid InterfaceClassGuid, uint MemberIndex,
@@ -126,6 +131,41 @@ internal static class HidNative
                 CM_Get_DevNode_Status(out uint status, out _, info.DevInst, 0);
                 if ((status & DN_STARTED) != 0)
                     return true;
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(devs); }
+        return false;
+    }
+
+    // Returns true if the v3 Magic Mouse BTHENUM parent device has DN_STARTED set.
+    // This is the pre-flip baseline check — if BTHENUM is not started before the flip,
+    // the BT stack is already wedged and the cycle should be skipped.
+    // Searches the BTHENUM enumerator directly (DIGCF_PRESENT|DIGCF_ALLCLASSES = 0x06),
+    // independent of mouhid binding state.
+    internal static bool IsV3BtStackHealthy()
+    {
+        const uint DIGCF_PRESENT_ALLCLASSES = 0x06;
+        var devs = SetupDiGetClassDevs(IntPtr.Zero, "BTHENUM", IntPtr.Zero, DIGCF_PRESENT_ALLCLASSES);
+        if (devs == IntPtr.Zero || devs == INVALID_HANDLE_VALUE) return false;
+        try
+        {
+            uint idx = 0;
+            while (true)
+            {
+                var info = new SP_DEVINFO_DATA();
+                info.cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>();
+                if (!SetupDiEnumDeviceInfo(devs, idx++, ref info)) break;
+
+                var idBuf = new StringBuilder(512);
+                if (CM_Get_Device_ID(info.DevInst, idBuf, (uint)idBuf.Capacity, 0) != 0) continue;
+                var id = idBuf.ToString().ToLowerInvariant();
+
+                if (!((id.Contains("0001004c") && id.Contains("0323")) ||
+                      (id.Contains("vid_05ac") && id.Contains("pid_0323"))))
+                    continue;
+
+                CM_Get_DevNode_Status(out uint status, out _, info.DevInst, 0);
+                return (status & DN_STARTED) != 0;
             }
         }
         finally { SetupDiDestroyDeviceInfoList(devs); }

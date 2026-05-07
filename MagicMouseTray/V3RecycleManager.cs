@@ -111,7 +111,19 @@ internal sealed class V3RecycleManager : IDisposable
     {
         Logger.Log("V3RECYCLE cycle start");
 
-        // Pre-check: device must be in Mode B before we start.
+        // Pre-check 1: BT stack health — BTHENUM parent must be DN_STARTED before we flip.
+        // If BTHENUM is not started, the wedge is pre-existing; flipping would fail and
+        // leave the device in an unknown state. Let SelfHealManager handle recovery.
+        bool btHealthy = await Task.Run(HidNative.IsV3BtStackHealthy, ct);
+        Logger.Log($"V3RECYCLE pre-check BTHENUM healthy={btHealthy}");
+        if (!btHealthy)
+        {
+            Logger.Log("V3RECYCLE pre-check: BTHENUM not DN_STARTED — skipping cycle, BT stack wedged");
+            RecordFailure("BTHENUM pre-flip not started");
+            return;
+        }
+
+        // Pre-check 2: device must be in Mode B before we start.
         // Mode A at entry means a prior cycle crashed mid-flip — skip and let SelfHealManager restore.
         bool preCheckModeA = await Task.Run(IsV3InModeA, ct);
         if (preCheckModeA)
