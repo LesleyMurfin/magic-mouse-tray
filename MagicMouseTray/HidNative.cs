@@ -1,5 +1,6 @@
 // P/Invoke declarations for HID and SetupDi APIs shared across all device readers.
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 namespace MagicMouseTray;
@@ -48,6 +49,11 @@ internal static class HidNative
     internal static extern IntPtr SetupDiGetClassDevs(ref Guid ClassGuid, string? Enumerator,
         IntPtr hwndParent, uint Flags);
 
+    // Overload: null ClassGuid with enumerator string (DIGCF_ALLCLASSES required)
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern IntPtr SetupDiGetClassDevs(IntPtr ClassGuid, string Enumerator,
+        IntPtr hwndParent, uint Flags);
+
     [DllImport("setupapi.dll", SetLastError = true)]
     internal static extern bool SetupDiEnumDeviceInterfaces(IntPtr DeviceInfoSet,
         IntPtr DeviceInfoData, ref Guid InterfaceClassGuid, uint MemberIndex,
@@ -60,8 +66,226 @@ internal static class HidNative
         uint DeviceInterfaceDetailDataSize, out uint RequiredSize,
         IntPtr DeviceInfoData);
 
+    // Overload: captures SP_DEVINFO_DATA (devnode) alongside the interface detail
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    static extern bool SetupDiGetDeviceInterfaceDetail(IntPtr DeviceInfoSet,
+        ref SP_DEVICE_INTERFACE_DATA DeviceInterfaceData,
+        ref SP_DEVICE_INTERFACE_DETAIL_DATA DeviceInterfaceDetailData,
+        uint DeviceInterfaceDetailDataSize, out uint RequiredSize,
+        ref SP_DEVINFO_DATA DeviceInfoData);
+
     [DllImport("setupapi.dll")]
     internal static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiEnumDeviceInfo(IntPtr DeviceInfoSet, uint MemberIndex,
+        ref SP_DEVINFO_DATA DeviceInfoData);
+
+    // cfgmgr32: read device instance ID string from devnode handle
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern uint CM_Get_Device_ID(uint dnDevInst, StringBuilder Buffer, uint BufferLen, uint ulFlags);
+
+    // cfgmgr32: query devnode operational status flags
+    [DllImport("cfgmgr32.dll")]
+    static extern uint CM_Get_DevNode_Status(out uint pulStatus, out uint pulProblemNumber, uint dnDevInst, uint ulFlags);
+
+    // cfgmgr32: read a typed device property from devnode (Windows 10+)
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode, EntryPoint = "CM_Get_DevNode_PropertyW")]
+    static extern uint CM_Get_DevNode_Property(uint dnDevInst, ref DEVPROPKEY PropertyKey,
+        out uint PropertyType, [Out] byte[] PropertyBuffer, ref uint PropertyBufferSize, uint ulFlags);
+
+    const uint DN_STARTED = 0x00000008; // driver start routine completed — device is running
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SP_DEVINFO_DATA
+    {
+        public uint cbSize;
+        public Guid ClassGuid;
+        public uint DevInst;
+        public IntPtr Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct DEVPROPKEY { public Guid fmtid; public uint pid; }
+
+    // DEVPKEY_Device_Stack {a45c254e-df1c-4efd-8020-67d146a850e0} pid=14
+    // STRING_LIST of drivers in the active kernel stack, populated after driver load completes.
+    static readonly DEVPROPKEY s_devpkeyStack = new()
+    {
+        fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
+        pid = 14
+    };
+
+    // GUID_DEVCLASS_MOUSE — Mouse class devices created by mouhid.sys when it binds to HID device
+    static readonly Guid MouseClassGuid = new("4d36e96f-e325-11ce-bfc1-08002be10318");
+
+    // Returns true if a Mouse class device for the v3 Magic Mouse exists, is present,
+    // AND has DN_STARTED set — meaning mouhid.sys has completed its start routine and
+    // is actively processing input. Device node existence alone is not sufficient;
+    // DN_STARTED is the empirical proof that the driver stack is operational.
+    //
+    // Note: uses DIGCF_PRESENT only (not DIGCF_DEVICEINTERFACE) — Mouse class devices
+    // are device instances, not HID interface paths.
+    internal static bool IsV3MouseClassPresent()
+    {
+        var guid = MouseClassGuid;
+        var devs = SetupDiGetClassDevs(ref guid, null, IntPtr.Zero, DIGCF_PRESENT);
+        if (devs == IntPtr.Zero || devs == INVALID_HANDLE_VALUE) return false;
+        try
+        {
+            uint idx = 0;
+            while (true)
+            {
+                var info = new SP_DEVINFO_DATA();
+                info.cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>();
+                if (!SetupDiEnumDeviceInfo(devs, idx++, ref info)) break;
+
+                // Instance ID directly contains VID/PID markers:
+                // HID\{00001124-...}_VID&0001004C_PID&0323\A&31E5D054&1B&0000
+                var idBuf = new StringBuilder(512);
+                if (CM_Get_Device_ID(info.DevInst, idBuf, (uint)idBuf.Capacity, 0) != 0) continue;
+                var id = idBuf.ToString().ToLowerInvariant();
+
+                if (!((id.Contains("0001004c") && id.Contains("0323")) ||
+                      (id.Contains("vid_05ac") && id.Contains("pid_0323"))))
+                    continue;
+
+                // Empirical proof: mouhid must have DN_STARTED — driver start routine complete.
+                // Device node existing without DN_STARTED means mouhid is still initializing.
+                CM_Get_DevNode_Status(out uint status, out _, info.DevInst, 0);
+                if ((status & DN_STARTED) != 0)
+                    return true;
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(devs); }
+        return false;
+    }
+
+    // Returns true if the v3 Magic Mouse BTHENUM parent device has DN_STARTED set.
+    // This is the pre-flip baseline check — if BTHENUM is not started before the flip,
+    // the BT stack is already wedged and the cycle should be skipped.
+    // Searches the BTHENUM enumerator directly (DIGCF_PRESENT|DIGCF_ALLCLASSES = 0x06),
+    // independent of mouhid binding state.
+    internal static bool IsV3BtStackHealthy()
+    {
+        const uint DIGCF_PRESENT_ALLCLASSES = 0x06;
+        var devs = SetupDiGetClassDevs(IntPtr.Zero, "BTHENUM", IntPtr.Zero, DIGCF_PRESENT_ALLCLASSES);
+        if (devs == IntPtr.Zero || devs == INVALID_HANDLE_VALUE) return false;
+        try
+        {
+            uint idx = 0;
+            while (true)
+            {
+                var info = new SP_DEVINFO_DATA();
+                info.cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>();
+                if (!SetupDiEnumDeviceInfo(devs, idx++, ref info)) break;
+
+                var idBuf = new StringBuilder(512);
+                if (CM_Get_Device_ID(info.DevInst, idBuf, (uint)idBuf.Capacity, 0) != 0) continue;
+                var id = idBuf.ToString().ToLowerInvariant();
+
+                // Require HID service UUID {00001124} — avoids matching Generic Access
+                // Profile {00001200} or other BTHENUM-enumerated profiles on the same device.
+                if (!id.Contains("00001124")) continue;
+
+                if (!((id.Contains("0001004c") && id.Contains("0323")) ||
+                      (id.Contains("vid_05ac") && id.Contains("pid_0323"))))
+                    continue;
+
+                CM_Get_DevNode_Status(out uint status, out _, info.DevInst, 0);
+                return (status & DN_STARTED) != 0;
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(devs); }
+        return false;
+    }
+
+    // Returns true if applewirelessmouse.sys is in the active kernel driver stack of the
+    // v3 Magic Mouse BTHENUM parent device (DEVPKEY_Device_Stack). Authoritative Mode B
+    // discriminator — only present after the filter driver loads following FLIP:AppleFilter
+    // + enable. mouhid.sys DN_STARTED (Mouse class device) stays True in Mode A and is a
+    // false positive; it must NOT be used for Mode B detection (confirmed 2026-05-07).
+    internal static bool IsApplewirelessmouseInStack()
+    {
+        const uint DIGCF_PRESENT_ALLCLASSES = 0x06;
+        const uint CR_SUCCESS = 0;
+        var devs = SetupDiGetClassDevs(IntPtr.Zero, "BTHENUM", IntPtr.Zero, DIGCF_PRESENT_ALLCLASSES);
+        if (devs == IntPtr.Zero || devs == INVALID_HANDLE_VALUE) return false;
+        try
+        {
+            uint idx = 0;
+            while (true)
+            {
+                var info = new SP_DEVINFO_DATA();
+                info.cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>();
+                if (!SetupDiEnumDeviceInfo(devs, idx++, ref info)) break;
+
+                var idBuf = new StringBuilder(512);
+                if (CM_Get_Device_ID(info.DevInst, idBuf, (uint)idBuf.Capacity, 0) != 0) continue;
+                var id = idBuf.ToString().ToLowerInvariant();
+
+                if (!id.Contains("00001124")) continue;
+                if (!((id.Contains("0001004c") && id.Contains("0323")) ||
+                      (id.Contains("vid_05ac") && id.Contains("pid_0323"))))
+                    continue;
+
+                var key = s_devpkeyStack;
+                uint bufSize = 4096;
+                var buf = new byte[bufSize];
+                if (CM_Get_DevNode_Property(info.DevInst, ref key, out _, buf, ref bufSize, 0) != CR_SUCCESS)
+                    return false;
+
+                // DEVPROP_TYPE_STRING_LIST: UTF-16 entries separated by null chars
+                var raw = Encoding.Unicode.GetString(buf, 0, (int)bufSize);
+                return raw.Split('\0', StringSplitOptions.RemoveEmptyEntries)
+                          .Any(e => e.IndexOf("applewireless", StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(devs); }
+        return false;
+    }
+
+    // Returns true if the v3 col02 HID interface path exists AND its devnode has DN_STARTED.
+    // col02 appearing in HID enumeration precedes HID class driver initialisation —
+    // DN_STARTED is the empirical proof the stack is ready for HidD_GetInputReport.
+    internal static bool IsV3Col02Ready()
+    {
+        var guid = HidGuid;
+        var devs = SetupDiGetClassDevs(ref guid, null, IntPtr.Zero,
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        if (devs == IntPtr.Zero || devs == INVALID_HANDLE_VALUE) return false;
+        try
+        {
+            uint index = 0;
+            while (true)
+            {
+                var iface = new SP_DEVICE_INTERFACE_DATA();
+                iface.cbSize = (uint)Marshal.SizeOf<SP_DEVICE_INTERFACE_DATA>();
+                if (!SetupDiEnumDeviceInterfaces(devs, IntPtr.Zero, ref guid, index++, ref iface))
+                    break;
+
+                var detail = new SP_DEVICE_INTERFACE_DETAIL_DATA();
+                detail.cbSize = IntPtr.Size == 8 ? 8u : 6u;
+                var devInfo = new SP_DEVINFO_DATA();
+                devInfo.cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>();
+                SetupDiGetDeviceInterfaceDetail(devs, ref iface, ref detail, 512, out _, ref devInfo);
+
+                if (string.IsNullOrEmpty(detail.DevicePath)) continue;
+                var p = detail.DevicePath;
+                if (!p.Contains("col02", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!((p.Contains("0001004c", StringComparison.OrdinalIgnoreCase) &&
+                       p.Contains("pid&0323", StringComparison.OrdinalIgnoreCase)) ||
+                      (p.Contains("vid_05ac", StringComparison.OrdinalIgnoreCase) &&
+                       p.Contains("pid_0323", StringComparison.OrdinalIgnoreCase))))
+                    continue;
+
+                CM_Get_DevNode_Status(out uint status, out _, devInfo.DevInst, 0);
+                return (status & DN_STARTED) != 0;
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(devs); }
+        return false;
+    }
 
     // Enumerates all present HID device interface paths.
     internal static IEnumerable<string> EnumerateHidPaths()

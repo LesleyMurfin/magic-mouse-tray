@@ -18,6 +18,7 @@ internal sealed class Config
 
     internal int Threshold { get; private set; } = 20;
     internal bool StartWithWindows { get; private set; }
+    internal bool EnableV3Recycle { get; private set; } = true;
 
     internal static Config Load()
     {
@@ -35,6 +36,8 @@ internal sealed class Config
                 cfg.Threshold = t;
             else if (key == "start_with_windows" && bool.TryParse(val, out bool s))
                 cfg.StartWithWindows = s;
+            else if (key == "enable_v3_recycle" && bool.TryParse(val, out bool r))
+                cfg.EnableV3Recycle = r;
         }
         return cfg;
     }
@@ -55,6 +58,13 @@ internal sealed class Config
         Logger.Log($"CONFIG start_with_windows={value}");
     }
 
+    internal void SetEnableV3Recycle(bool value)
+    {
+        EnableV3Recycle = value;
+        Persist();
+        Logger.Log($"CONFIG enable_v3_recycle={value}");
+    }
+
     static bool IsValid(int t) => t is 10 or 15 or 20 or 25;
 
     void Persist()
@@ -64,7 +74,8 @@ internal sealed class Config
             Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);
             File.WriteAllLines(ConfigPath, [
                 $"threshold={Threshold}",
-                $"start_with_windows={StartWithWindows.ToString().ToLower()}"
+                $"start_with_windows={StartWithWindows.ToString().ToLower()}",
+                $"enable_v3_recycle={EnableV3Recycle.ToString().ToLower()}"
             ]);
         }
         catch { }
