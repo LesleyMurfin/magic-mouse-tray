@@ -72,6 +72,12 @@ internal static class HidNative
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     static extern uint CM_Get_Device_ID(uint dnDevInst, StringBuilder Buffer, uint BufferLen, uint ulFlags);
 
+    // cfgmgr32: query devnode operational status flags
+    [DllImport("cfgmgr32.dll")]
+    static extern uint CM_Get_DevNode_Status(out uint pulStatus, out uint pulProblemNumber, uint dnDevInst, uint ulFlags);
+
+    const uint DN_STARTED = 0x00000008; // driver start routine completed — device is running
+
     [StructLayout(LayoutKind.Sequential)]
     struct SP_DEVINFO_DATA
     {
@@ -84,13 +90,13 @@ internal static class HidNative
     // GUID_DEVCLASS_MOUSE — Mouse class devices created by mouhid.sys when it binds to HID device
     static readonly Guid MouseClassGuid = new("4d36e96f-e325-11ce-bfc1-08002be10318");
 
-    // Returns true if a Mouse class device with a v3 Magic Mouse instance ID exists and is present.
-    // mouhid.sys creates a Mouse class device only after it successfully binds — this is the
-    // definitive signal that cursor input is restored (unlike CreateFile which fires at PnP enumeration,
-    // before mouhid has attached). The Mouse class device instance ID directly encodes VID/PID.
+    // Returns true if a Mouse class device for the v3 Magic Mouse exists, is present,
+    // AND has DN_STARTED set — meaning mouhid.sys has completed its start routine and
+    // is actively processing input. Device node existence alone is not sufficient;
+    // DN_STARTED is the empirical proof that the driver stack is operational.
     //
-    // Note: uses DIGCF_PRESENT only (not DIGCF_DEVICEINTERFACE) — Mouse class devices are device
-    // instances, not HID interface paths. Using DIGCF_DEVICEINTERFACE returns an empty set.
+    // Note: uses DIGCF_PRESENT only (not DIGCF_DEVICEINTERFACE) — Mouse class devices
+    // are device instances, not HID interface paths.
     internal static bool IsV3MouseClassPresent()
     {
         var guid = MouseClassGuid;
@@ -105,14 +111,20 @@ internal static class HidNative
                 info.cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>();
                 if (!SetupDiEnumDeviceInfo(devs, idx++, ref info)) break;
 
-                // The Mouse class device instance ID directly contains VID/PID markers.
-                // e.g. HID\{00001124-...}_VID&0001004C_PID&0323\A&31E5D054&1B&0000
+                // Instance ID directly contains VID/PID markers:
+                // HID\{00001124-...}_VID&0001004C_PID&0323\A&31E5D054&1B&0000
                 var idBuf = new StringBuilder(512);
                 if (CM_Get_Device_ID(info.DevInst, idBuf, (uint)idBuf.Capacity, 0) != 0) continue;
                 var id = idBuf.ToString().ToLowerInvariant();
 
-                if ((id.Contains("0001004c") && id.Contains("0323")) ||
-                    (id.Contains("vid_05ac") && id.Contains("pid_0323")))
+                if (!((id.Contains("0001004c") && id.Contains("0323")) ||
+                      (id.Contains("vid_05ac") && id.Contains("pid_0323"))))
+                    continue;
+
+                // Empirical proof: mouhid must have DN_STARTED — driver start routine complete.
+                // Device node existing without DN_STARTED means mouhid is still initializing.
+                CM_Get_DevNode_Status(out uint status, out _, info.DevInst, 0);
+                if ((status & DN_STARTED) != 0)
                     return true;
             }
         }
