@@ -128,10 +128,8 @@ internal sealed class KeyboardBatteryDevice : IBatteryDevice
             }
             else
             {
-                // Timeout: keyboard was already connected when we opened, no push forthcoming.
-                // Sleep until the next likely reconnect (e.g., after sleep/wake).
+                // Timeout: no push in 30s. Re-open immediately so we never miss a reconnect push.
                 Logger.Log($"KB_MONITOR_TIMEOUT cached={s_cachedBattery}");
-                Thread.Sleep(TimeSpan.FromMinutes(2));
             }
         }
 
