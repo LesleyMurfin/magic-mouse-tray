@@ -22,12 +22,12 @@ DefaultDestDir = 13   ; %SystemRoot%\System32\Drivers
 MagicKbDesc.sys = 1,,
 
 [Manufacturer]
-%ManufacturerName% = Standard,NTamd64
+%ManufacturerName% = Standard,NTamd64.10.0...17763
 
 ; Apple keyboard PIDs — full whitelist from PRD-185 (lesley-workspace).
 ; A1314 dual-PID coverage is critical (0x0239 = 2009 fw rev,
 ; 0x0255 = 2011 fw rev — same Apple model number).
-[Standard.NTamd64]
+[Standard.NTamd64.10.0...17763]
 %DeviceDesc% = MagicKbDesc_Inst, BTHENUM\{00001124-0000-1000-8000-00805f9b34fb}_VID&000205ac_PID&022c
 %DeviceDesc% = MagicKbDesc_Inst, BTHENUM\{00001124-0000-1000-8000-00805f9b34fb}_VID&000205ac_PID&022d
 %DeviceDesc% = MagicKbDesc_Inst, BTHENUM\{00001124-0000-1000-8000-00805f9b34fb}_VID&000205ac_PID&022e
@@ -42,11 +42,14 @@ MagicKbDesc.sys = 1,,
 %DeviceDesc% = MagicKbDesc_Inst, BTHENUM\{00001124-0000-1000-8000-00805f9b34fb}_VID&0001004c_PID&0322
 
 [MagicKbDesc_Inst.NT]
+Include        = input.inf, hidbth.inf
+Needs          = HIDBTH_Inst.NT
 CopyFiles      = MagicKbDesc_Files
-Service        = HidBth                  ; we don't replace HidBth, just lower-filter it
 LowerFilters   = MagicKbDesc
 
 [MagicKbDesc_Inst.NT.Services]
+Include    = input.inf, hidbth.inf
+Needs      = HIDBTH_Inst.NT.Services
 AddService = MagicKbDesc, , MagicKbDesc_Service
 
 [MagicKbDesc_Service]
