@@ -1,31 +1,59 @@
 # kbd-l2cap-with-hid-disable-2026-05-08.ps1
 #
-# End-to-end probe of the macOS battery flow on Windows:
-#   1. Find the Apple keyboard via BluetoothFindFirstDevice.
+# End-to-end probe of the macOS battery flow on Windows. Works against any
+# Apple BT HID device — the macOS HCI captures of the Apple keyboard and
+# the V1 Magic Mouse show the SAME steady-state battery query bytes:
+#
+#   GET_REPORT Feature, RID 0x47   ->   `43 47`        (BATTERY LEVEL)
+#   response                              `A3 47 <pct>`
+#   GET_REPORT Input,   RID 0x30   ->   `41 30`        (BATTERY STATUS)
+#   response                              `A1 30 <flag>` (0=OK, non-zero=warning)
+#
+# The connect-time init differs by device:
+#
+#   keyboard (PID 0x0239):  one SET_REPORT Feature, `53 4A 03`
+#   V1 magic mouse (PID 0x030D): a sequence of vendor SET_REPORTs to
+#       gesture/sensitivity RIDs (0xC6 rejected, then 0xF1, 0xF8, 0xD7).
+#       None of those are battery-related; the mouse responds to `43 47`
+#       perfectly well without any host-issued init.
+#
+# Test plan therefore: try the bare battery query first (no init) to find
+# out whether the firmware needs the keyboard's `53 4A 03` step at all.
+# Use -Device <keyboard|mouse|none> to control which init the script runs.
+#
+# Sequence:
+#   1. Find the device via BluetoothFindFirstDevice.
 #   2. Disable its HID profile via BluetoothSetServiceState
 #      (HumanInterfaceDeviceServiceClass_UUID, BLUETOOTH_SERVICE_DISABLE).
 #      This releases the in-box BT HID profile's hold on PSM 0x11.
 #   3. Open a Winsock AF_BTH socket on PSM 0x11 (HID Control).
-#   4. Send `53 4A 03` (SET_REPORT Feature, RID 0x4A, val 0x03) — the init.
-#   5. Read handshake.
-#   6. Send `43 47` (GET_REPORT Feature, RID 0x47).
-#   7. Read response — last byte is battery %.
-#   8. ALWAYS re-enable HID profile before exiting (try/finally).
+#   4. (keyboard only by default) Send `53 4A 03` and read handshake.
+#   5. Send `43 47` and read battery-level response.
+#   6. Send `41 30` and read battery-status response.
+#   7. ALWAYS re-enable HID profile before exiting (try/finally).
 #
-# This is the wire-byte exact replica of what macOS does (see
-# docs/M4-MAC-CAPTURE-FINDINGS-2026-05-08.md). It bypasses Windows'
-# HidD_* RID validation by going below the HID class.
-#
-# WARNING: while HID is disabled the keyboard cannot type. The window
-# is short (typically <1 second). If the script crashes/aborts, the
-# keyboard may be stuck without HID — re-run the script (it forces
-# re-enable in finally) or do it manually:
+# WARNING: while HID is disabled the device cannot input. The window is
+# short (typically <1 second). If the script crashes/aborts, the device
+# may be stuck without HID — re-run the script (it forces re-enable in
+# finally) or do it manually:
 #
 #   $hid = '00001124-0000-1000-8000-00805f9b34fb'
 #   # via Settings > Bluetooth > Disconnect/Connect, or:
-#   pnputil /restart-device "BTHENUM\Dev_E806884B0741"
+#   pnputil /restart-device "BTHENUM\Dev_<bdaddr-no-colons>"
 #
 # Run as Administrator.
+#
+# Examples:
+#   .\kbd-l2cap-with-hid-disable-2026-05-08.ps1
+#   .\kbd-l2cap-with-hid-disable-2026-05-08.ps1 -BdAddr 04:F1:3E:EE:DE:10 -Device mouse
+#   .\kbd-l2cap-with-hid-disable-2026-05-08.ps1 -BdAddr 04:F1:3E:EE:DE:10 -Device none
+
+[CmdletBinding()]
+param(
+    [string]$BdAddr = 'E8:06:88:4B:07:41',
+    [ValidateSet('keyboard','mouse','none')]
+    [string]$Device = 'keyboard'
+)
 
 $ErrorActionPreference = 'Stop'
 $Out = Join-Path $PSScriptRoot 'kbd-l2cap-with-hid-disable.txt'
@@ -42,8 +70,9 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     return
 }
 
-$KbdBdAddrStr = 'E8:06:88:4B:07:41'
+$KbdBdAddrStr = $BdAddr   # variable name kept for compatibility with internal log lines
 $PSM_HID_CONTROL = 0x11
+L "Target device: $Device  BD addr: $BdAddr"
 
 Add-Type -TypeDefinition @'
 using System;
@@ -245,13 +274,13 @@ do {
 [BtApi]::BluetoothFindDeviceClose($hFindDev) | Out-Null
 
 if (-not $found) {
-    L "FATAL: keyboard $KbdBdAddrStr not in device list. Is it paired?"
+    L "FATAL: device $KbdBdAddrStr not in paired list. Is it paired?"
     [BtApi]::BluetoothFindRadioClose($hFindRadio) | Out-Null
     [BtApi]::CloseHandle($hRadio) | Out-Null
     $log | Set-Content -Path $Out -Encoding UTF8
     return
 }
-L "Found keyboard: $($devInfo.szName.Trim())"
+L "Found device: $($devInfo.szName.Trim())"
 L ""
 
 # --- Disable HID profile so we can grab PSM 0x11 ---------------------------
@@ -289,7 +318,7 @@ try {
 
     # Set 5s recv/send timeouts so a misbehaving firmware can't hang the script
     # with HID disabled. If recv times out we surface WSAETIMEDOUT (10060) and
-    # the finally block re-enables HID — keyboard usable again within seconds.
+    # the finally block re-enables HID — device usable again within seconds.
     $timeoutMs = 5000
     [L2cap]::setsockopt($sock, [L2cap]::SOL_SOCKET, [L2cap]::SO_RCVTIMEO, [ref]$timeoutMs, 4) | Out-Null
     [L2cap]::setsockopt($sock, [L2cap]::SOL_SOCKET, [L2cap]::SO_SNDTIMEO, [ref]$timeoutMs, 4) | Out-Null
@@ -325,7 +354,7 @@ try {
             10050 { 'WSAENETDOWN' }
             10060 { 'WSAETIMEDOUT' }
             10061 { 'WSAECONNREFUSED (firmware refused channel — interesting)' }
-            10064 { 'WSAEHOSTDOWN (keyboard asleep — wake it and rerun)' }
+            10064 { 'WSAEHOSTDOWN (device asleep — wake it and rerun)' }
             default { '' }
         }
         L "connect() FAILED err=$err  $name"
@@ -336,21 +365,31 @@ try {
     L "*** L2CAP CONNECTED on PSM 0x11 ***"
     L ""
 
-    # --- 1. SET_REPORT Feature RID 0x4A, val 0x03 ------------------------
+    # --- 1. (optional) Device-specific init ------------------------------
+    # keyboard: SET_REPORT Feature RID 0x4A, val 0x03 — observed in macOS HCI.
+    # mouse:    macOS sends several gesture-config Set Features (RIDs 0xF1,
+    #           0xF8, 0xD7) but none are battery-related; the firmware
+    #           responds to 0x43 0x47 without any host-issued init. Skip.
+    # none:     skip init regardless — useful for testing whether init is
+    #           actually required for ANY Apple BT HID device.
 
-    $initBytes = [byte[]]@(0x53, 0x4A, 0x03)
-    L "Sending init: [$(Hex $initBytes 3)]"
-    $ns = [L2cap]::send($sock, $initBytes, $initBytes.Length, 0)
-    if ($ns -ne $initBytes.Length) {
-        L "send(init) failed err=$([L2cap]::WSAGetLastError())"
-    } else {
-        $rb = New-Object byte[] 32
-        $nr = [L2cap]::recv($sock, $rb, $rb.Length, 0)
-        if ($nr -le 0) {
-            L "recv(handshake) returned $nr  err=$([L2cap]::WSAGetLastError())"
+    if ($Device -eq 'keyboard') {
+        $initBytes = [byte[]]@(0x53, 0x4A, 0x03)
+        L "Sending keyboard init: [$(Hex $initBytes 3)]"
+        $ns = [L2cap]::send($sock, $initBytes, $initBytes.Length, 0)
+        if ($ns -ne $initBytes.Length) {
+            L "send(init) failed err=$([L2cap]::WSAGetLastError())"
         } else {
-            L "Handshake: [$(Hex $rb $nr)]  $(if ($rb[0] -eq 0x00) { '(Successful)' } else { '(code 0x' + ('{0:X2}' -f $rb[0]) + ')' })"
+            $rb = New-Object byte[] 32
+            $nr = [L2cap]::recv($sock, $rb, $rb.Length, 0)
+            if ($nr -le 0) {
+                L "recv(handshake) returned $nr  err=$([L2cap]::WSAGetLastError())"
+            } else {
+                L "Handshake: [$(Hex $rb $nr)]  $(if ($rb[0] -eq 0x00) { '(Successful)' } else { '(code 0x' + ('{0:X2}' -f $rb[0]) + ')' })"
+            }
         }
+    } else {
+        L "Skipping init step (Device=$Device). Going straight to battery query."
     }
 
     # --- 2. GET_REPORT Feature RID 0x47 (BATTERY LEVEL) -----------------
@@ -446,13 +485,13 @@ finally {
         $rc2 = [BtApi]::BluetoothSetServiceState($hRadio, [ref]$deviceForEnable, [ref]$hidGuid,
             [BtApi]::BLUETOOTH_SERVICE_ENABLE)
         if ($rc2 -ne 0) {
-            L "BluetoothSetServiceState(ENABLE) returned $rc2 — KEYBOARD MAY BE UNUSABLE."
+            L "BluetoothSetServiceState(ENABLE) returned $rc2 — DEVICE MAY BE UNUSABLE."
             if ($rc2 -eq 87) {
                 L "  err=87 (ERROR_INVALID_PARAMETER) often clears after a Bluetooth"
                 L "  radio toggle (Settings > Bluetooth > off/on) — try that first."
             }
             L "  Manual fix: Settings > Bluetooth > toggle radio off/on,"
-            L "  or unpair/repair the keyboard,"
+            L "  or unpair/repair the device,"
             L "  or run: pnputil /restart-device 'BTHENUM\Dev_$($KbdBdAddrStr -replace '[:]','')'"
         } else {
             L "HID profile re-enabled."
