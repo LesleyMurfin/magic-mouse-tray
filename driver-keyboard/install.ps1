@@ -1,4 +1,4 @@
-# install.ps1 — pnputil /add-driver via mm-task-runner INSTALL-DRIVER route.
+# install.ps1 -- pnputil /add-driver via mm-task-runner INSTALL-DRIVER route.
 # Runs as SYSTEM (admin PnP rights). Pre: sign.ps1 has signed the staged files.
 
 param(
@@ -30,7 +30,7 @@ if ($Uninstall) {
     return
 }
 
-if (-not (Test-Path $inf)) { throw "$inf missing — run .\sign.ps1 first" }
+if (-not (Test-Path $inf)) { throw "$inf missing -- run .\sign.ps1 first" }
 
 $nonce = 'install-' + [guid]::NewGuid().ToString().Substring(0,8)
 Set-Content "$q\request.txt" "INSTALL-DRIVER|$nonce|$inf" -Encoding ASCII

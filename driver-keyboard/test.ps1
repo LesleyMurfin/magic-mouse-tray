@@ -1,4 +1,4 @@
-# test.ps1 — smoke test the descriptor patch landed.
+# test.ps1 -- smoke test the descriptor patch landed.
 # HidD_GetFeature(Col02, RID=0x47, len=2) should succeed once the
 # MagicKbDesc filter is in the stack.
 # Expected: *** SUCCESS *** [47 NN]   BATTERY = NN%
@@ -15,7 +15,7 @@ public static class Hid {
 '@
 
 $col02 = Get-PnpDevice -Class HIDClass | Where-Object { $_.InstanceId -match 'PID&0239&Col02' -and $_.InstanceId -match '00001124' } | Select-Object -First 1
-if (-not $col02) { Write-Host 'Col02 not found — keyboard not paired/connected?' -ForegroundColor Red; exit 1 }
+if (-not $col02) { Write-Host 'Col02 not found -- keyboard not paired/connected?' -ForegroundColor Red; exit 1 }
 
 $key  = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceClasses\{4d1e55b2-f16f-11cf-88cb-001111000030}"
 $path = (Get-ChildItem $key | Where-Object { $_.PSChildName -match ($col02.InstanceId -replace '\\','#') } | Select-Object -First 1).PSChildName -replace '^##\?#','\\?\' -replace '#\{','#{'
@@ -38,7 +38,7 @@ if ($ok) {
     exit 0
 } else {
     Write-Host "FAILED ok=$ok err=$err" -ForegroundColor Yellow
-    if ($err -eq 1)  { Write-Host '  err=1 = ERROR_INVALID_FUNCTION (descriptor patch not applied — check stack via .\restart-device.ps1)' }
+    if ($err -eq 1)  { Write-Host '  err=1 = ERROR_INVALID_FUNCTION (descriptor patch not applied -- check stack via .\restart-device.ps1)' }
     if ($err -eq 87) { Write-Host '  err=87 = ERROR_INVALID_PARAMETER (buffer size mismatch?)' }
     exit 1
 }

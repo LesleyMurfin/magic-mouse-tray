@@ -1,4 +1,4 @@
-# troubleshoot.ps1 — comprehensive diagnostic dump for the MagicKbDesc descriptor patcher.
+# troubleshoot.ps1 -- comprehensive diagnostic dump for the MagicKbDesc descriptor patcher.
 # Run anytime to capture the full state. If `.\test.ps1` fails, run this and share the output.
 #
 # Captures:
@@ -34,7 +34,7 @@ Write-Host "  INF:        $inf"
 Write-Host "  Desc:       $desc"
 $haveFilter = $stack -contains '\Driver\MagicKbDesc'
 if ($haveFilter) { Write-Host '  ✓ MagicKbDesc filter IS in stack' -ForegroundColor Green }
-else { Write-Host '  ✗ MagicKbDesc filter NOT in stack — re-run .\restart-device.ps1 or toggle BT' -ForegroundColor Yellow }
+else { Write-Host '  ✗ MagicKbDesc filter NOT in stack -- re-run .\restart-device.ps1 or toggle BT' -ForegroundColor Yellow }
 
 & $banner '3. HID collection caps (Input/Output/Feature byte length)'
 Add-Type -TypeDefinition @'
@@ -72,7 +72,7 @@ $cols = Get-PnpDevice -Class HIDClass -ErrorAction SilentlyContinue | Where-Obje
 foreach ($col in $cols) {
     $ifKey = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceClasses\{4d1e55b2-f16f-11cf-88cb-001111000030}"
     $ent = Get-ChildItem $ifKey -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match ($col.InstanceId -replace '\\','#') } | Select-Object -First 1
-    if (-not $ent) { Write-Host "  $($col.InstanceId) — no interface path"; continue }
+    if (-not $ent) { Write-Host "  $($col.InstanceId) -- no interface path"; continue }
     $path = $ent.PSChildName -replace '^##\?#','\\?\' -replace '#\{','#{'
     $h = [HidDiag]::CreateFileW($path, 0, 3, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
     if ($h -eq [IntPtr]::new(-1)) { Write-Host "  CreateFile failed for $path"; continue }
@@ -89,12 +89,12 @@ foreach ($col in $cols) {
 }
 Write-Host '  (Patcher target: Col02 Feature should become >= 2 after patch lands)'
 
-& $banner '4. raw HID Report Descriptor — Col02 (looking for 09 20 B1 02 patch)'
+& $banner '4. raw HID Report Descriptor -- Col02 (looking for 09 20 B1 02 patch)'
 $col02 = $cols | Where-Object { $_.InstanceId -match 'Col02' } | Select-Object -First 1
 if ($col02) {
     $ent = Get-ChildItem $ifKey -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match ($col02.InstanceId -replace '\\','#') } | Select-Object -First 1
     $path = $ent.PSChildName -replace '^##\?#','\\?\' -replace '#\{','#{'
-    # Use python+hidapi-style read via Win32 — falls back to "raw not avail" message if not supported
+    # Use python+hidapi-style read via Win32 -- falls back to "raw not avail" message if not supported
     Write-Host "  Col02 path: $path"
     Write-Host '  (Fetching raw descriptor requires HidD_GetReportDescriptor which is Win10+ only.)'
     try {
@@ -119,9 +119,9 @@ public static class HidDescGet {
                 if ($hexAll -match '8147[0-9A-F]*?09 ?20 ?B1 ?02') {
                     Write-Host '  ✓ patch sequence (09 20 B1 02) FOUND after RID 0x47' -ForegroundColor Green
                 } elseif ($hexAll -match '8147') {
-                    Write-Host '  ✗ RID 0x47 present but patch sequence (09 20 B1 02) NOT found — descriptor was NOT patched' -ForegroundColor Yellow
+                    Write-Host '  ✗ RID 0x47 present but patch sequence (09 20 B1 02) NOT found -- descriptor was NOT patched' -ForegroundColor Yellow
                 } else {
-                    Write-Host '  ? RID 0x47 not seen in first 4KB — unusual'
+                    Write-Host '  ? RID 0x47 not seen in first 4KB -- unusual'
                 }
             } else {
                 Write-Host "  HidD_GetReportDescriptor failed err=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
@@ -144,7 +144,7 @@ foreach ($p in $sysPaths) {
 
 & $banner '6. recent kernel-mode debug output (DbgView circular buffer if Boot/PERSISTENT enabled)'
 Write-Host '  KdPrint() output goes to the kernel debugger. Capture with DbgView.exe or'
-Write-Host '  enable KDPRINT logging to %SystemRoot%\Logs\WMI\trace.etl. Out of band — not here.'
+Write-Host '  enable KDPRINT logging to %SystemRoot%\Logs\WMI\trace.etl. Out of band -- not here.'
 
 if (-not $NoEventLog) {
     & $banner '7. recent System event log entries mentioning MagicKbDesc / hidbth (last 50)'
@@ -156,9 +156,9 @@ if (-not $NoEventLog) {
 
 & $banner '8. summary verdict'
 if ($haveFilter) {
-    Write-Host '  Filter is bound — if .\test.ps1 still fails, dump (4) above and check the descriptor section: did 09 20 B1 02 land?'
+    Write-Host '  Filter is bound -- if .\test.ps1 still fails, dump (4) above and check the descriptor section: did 09 20 B1 02 land?'
 } else {
     Write-Host '  Filter NOT bound. Sequence: .\install.ps1 → .\restart-device.ps1 → .\test.ps1.'
-    Write-Host '  If install.ps1 says "up-to-date" but the filter isnt in the stack, the INF needs ExtensionId — see PR conversation.'
+    Write-Host '  If install.ps1 says "up-to-date" but the filter isnt in the stack, the INF needs ExtensionId -- see PR conversation.'
 }
 Write-Host ''

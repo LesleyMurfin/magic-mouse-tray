@@ -1,4 +1,4 @@
-# restart-device.ps1 — force PnP re-enumeration of the keyboard so newly-installed
+# restart-device.ps1 -- force PnP re-enumeration of the keyboard so newly-installed
 # drivers/filters bind. Uses mm-task-runner RESTART-DEVICE route (SYSTEM).
 
 param(

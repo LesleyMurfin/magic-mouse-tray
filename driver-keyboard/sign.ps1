@@ -1,4 +1,4 @@
-# sign.ps1 — sign MagicKbDesc.sys + .cat via mm-task-runner SIGN-FILE route.
+# sign.ps1 -- sign MagicKbDesc.sys + .cat via mm-task-runner SIGN-FILE route.
 # Runs as SYSTEM (private-key access to LocalMachine\My). Pre: build.cmd has
 # staged the artifacts at C:\Windows\Temp\MagicKbDescStage\.
 
@@ -8,7 +8,7 @@ $stage = 'C:\Windows\Temp\MagicKbDescStage'
 $q     = 'C:\mm-dev-queue'
 
 foreach ($f in @("$stage\MagicKbDesc.sys", "$stage\MagicKbDesc.cat")) {
-    if (-not (Test-Path $f)) { throw "$f not staged — run .\build.cmd first" }
+    if (-not (Test-Path $f)) { throw "$f not staged -- run .\build.cmd first" }
 }
 
 function Sign-One($file) {
