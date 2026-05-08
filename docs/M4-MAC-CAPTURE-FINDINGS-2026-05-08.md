@@ -197,10 +197,89 @@ to a 60 s constant:
    Linux box with `btmon`. Only required if C′ fails and we have to debug
    the wire encoding.
 
-## Next step
+## Next step (SUPERSEDED — see Empirical update 2026-05-08 below)
 
 Run [scripts/kbd-setfeature-then-getinput-2026-05-08.ps1](../scripts/kbd-setfeature-then-getinput-2026-05-08.ps1)
 on the Windows machine with the keyboard paired and connected.
+
+## Empirical update — 2026-05-08
+
+Three rounds of probe iteration (PR #36 SO_RCVTIMEO, PR #37 dual-error
+capture, third run with `BluetoothSetServiceState(DISABLE)` + raw L2CAP)
+all produced the same result:
+
+```
+connect() returned: -1  (WSAGetLastError=0  Marshal.GetLastWin32Error=0)
+```
+
+Both Win32 error sources read 0 immediately after the failure — the
+kernel BT stack rejects the connect at a layer below Winsock's
+error-propagation surface, even with the HID profile administratively
+disabled. Userland `AF_BTH/BTHPROTO_L2CAP` to PSM `0x11` is **not a
+supported Windows path** while the device is paired as a HID device.
+
+But then a much smaller test changed the picture entirely. Calling
+`HidD_GetFeature(Col03, RID=0x09, len=4)` from userland **SUCCEEDED**
+with real bytes `[92 12 02 02]`:
+
+```
+[Col03 / RID 0x09 / declared Feature 4 bytes]
+  HidD_GetFeature(rid=0x09, len=4)...
+  *** SUCCESS *** bytes: [92 12 02 02]
+
+[Col02 / RID 0x47 / declared Input only / control test]
+  HidD_GetFeature(rid=0x47, len=2)...
+  FAILED (ok=False err=1) -- ERROR_INVALID_FUNCTION
+```
+
+This proves **Windows BT HID can issue Feature `GET_REPORT`s to this
+firmware over L2CAP without any userland L2CAP work, without a Set
+Feature init, and without driver replacement.** The keyboard responds
+on the first try.
+
+The only blocker for `HidD_GetFeature(Col02, RID=0x47)` is `hidclass.sys`
+descriptor validation: RID `0x47` is declared as Input only (`81 02`)
+in Apple's public descriptor, so the userland call is rejected before
+the bytes ever reach the L2CAP wire.
+
+### Implication: a 4-byte descriptor patch is the entire fix
+
+Insert `09 20 B1 02` immediately before the `c0 c0` closing Col02:
+
+```
+Original Col02 (31 bytes): ... 75 08 95 01 81 02         c0 c0
+Patched  Col02 (35 bytes): ... 75 08 95 01 81 02 09 20 B1 02 c0 c0
+                                                  ^^^^^^^^^^^
+                                                  re-emit Usage(Battery Strength)
+                                                  + Feature main item
+```
+
+Global items (Report Size 8, Count 1, Logical Min 0, Logical Max 255)
+carry across main items per HID 1.11 §6.2.2.7, so only the Usage (a
+local item) needs re-emitting. After the patch, `hidclass.sys` parses
+RID `0x47` as both Input and Feature; `HidD_GetFeature(0x47)` succeeds;
+kernel sends `43 47`; firmware responds `A3 47 NN`; userland gets the
+battery byte.
+
+### Why a kernel filter is still required
+
+Patching the descriptor from user-mode is impossible because
+`hidclass.sys` parses the descriptor once at attach time and caches the
+result. The patch must happen on the IRP path:
+
+- Lower filter on `BTHENUM\{...}_VID&05AC_PID&{Apple kb whitelist}`
+- Intercept `IOCTL_HID_GET_REPORT_DESCRIPTOR`
+- In the completion routine, locate Col02's tail by scanning for the
+  `85 47 ... 81 02 c0 c0` pattern
+- Insert the 4 patch bytes; update `Information` to the new size
+- Forward up the stack
+
+This is the entire driver. ~150-250 lines of KMDF C. No init injection,
+no L2CAP relay, no descriptor replacement, no `bcdedit /set testsigning on`
+at runtime — production-signed via the existing M12 `CN=MagicMouseFix`
+cert in TrustedPublisher.
+
+Scaffold: [`driver-keyboard/`](../driver-keyboard/) (this PR).
 
 ## Byte-exact findings (HCI capture, 2026-05-08 second pass)
 
