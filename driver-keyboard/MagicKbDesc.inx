@@ -4,13 +4,14 @@
 ; both Input and Feature. Apple keyboards over Bluetooth Classic.
 
 [Version]
-Signature   = "$WINDOWS NT$"
-Class       = HIDClass
-ClassGuid   = {745A17A0-74D3-11D0-B6FE-00A0C90F57DA}
-Provider    = %ProviderName%
-CatalogFile = MagicKbDesc.cat
-PnpLockDown = 1
-DriverVer   =                  ; stampinf will fill this in
+Signature      = "$WINDOWS NT$"
+Class          = Extension                            ; extension INF — coexists with hidbth.inf
+ClassGuid      = {e2f84ce7-8efa-411c-aa69-97454ca4cb57}
+Provider       = %ProviderName%
+ExtensionId    = {dc8e1bbf-1c8b-4d8a-8d3e-6dab4e7d9b41} ; new GUID for THIS extension package
+CatalogFile    = MagicKbDesc.cat
+PnpLockDown    = 1
+DriverVer      =                  ; stampinf will fill this in
 
 [DestinationDirs]
 DefaultDestDir = 13   ; %SystemRoot%\System32\Drivers
@@ -41,15 +42,19 @@ MagicKbDesc.sys = 1,,
 %DeviceDesc% = MagicKbDesc_Inst, BTHENUM\{00001124-0000-1000-8000-00805f9b34fb}_VID&0001004c_PID&0321
 %DeviceDesc% = MagicKbDesc_Inst, BTHENUM\{00001124-0000-1000-8000-00805f9b34fb}_VID&0001004c_PID&0322
 
+; Extension INFs do NOT install a function driver. They contribute only
+; the additions specified here — in our case, a LowerFilters entry that
+; gets merged with the function driver's (hidbth.inf) install state.
+; No Include/Needs needed; PnP layers extension installs over the base.
+
 [MagicKbDesc_Inst.NT]
-Include        = input.inf, hidbth.inf
-Needs          = HIDBTH_Inst.NT
-CopyFiles      = MagicKbDesc_Files
-LowerFilters   = MagicKbDesc
+CopyFiles    = MagicKbDesc_Files
+AddReg       = MagicKbDesc_AddReg
+
+[MagicKbDesc_AddReg]
+HKR,,"LowerFilters",0x00010008,"MagicKbDesc"   ; FLG_ADDREG_TYPE_MULTI_SZ | FLG_ADDREG_APPEND
 
 [MagicKbDesc_Inst.NT.Services]
-Include    = input.inf, hidbth.inf
-Needs      = HIDBTH_Inst.NT.Services
 AddService = MagicKbDesc, , MagicKbDesc_Service
 
 [MagicKbDesc_Service]
