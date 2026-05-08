@@ -56,7 +56,15 @@ public static class L2cap {
     public const int SOCK_STREAM    = 1;
     public const int BTHPROTO_L2CAP = 0x100;
 
-    [StructLayout(LayoutKind.Sequential)]
+    // Microsoft ws2bth.h: SOCKADDR_BTH is documented 36 bytes
+    //   USHORT      addressFamily   @0   (2 bytes)
+    //   (6-byte pad to 8-align ulong)
+    //   BTH_ADDR    btAddr          @8   (8 bytes)
+    //   GUID        serviceClassId  @16  (16 bytes)
+    //   ULONG       port            @32  (4 bytes)
+    // Total: 36 bytes (no trailing pad).
+    // Pack=8 makes the layout explicit and stable across .NET versions.
+    [StructLayout(LayoutKind.Sequential, Pack=8)]
     public struct SOCKADDR_BTH {
         public ushort addressFamily;
         public ulong  btAddr;
@@ -292,12 +300,26 @@ try {
     $sa.serviceClassId = [Guid]::Empty
     $sa.port           = [uint32]$PSM_HID_CONTROL
     $sasize = [Runtime.InteropServices.Marshal]::SizeOf([Type]([L2cap+SOCKADDR_BTH]))
+    L ("SOCKADDR_BTH size: {0} bytes (Win32 docs: 36)" -f $sasize)
+
+    # BluetoothSetServiceState(DISABLE) sets future-acceptance state but
+    # may not immediately tear down an active L2CAP session. Give it
+    # extra time before the connect attempt (was 1.5s, now 3s).
+    L "Extra 1.5s wait for any lingering channel teardown..."
+    Start-Sleep -Milliseconds 1500
 
     L "connect(BD=$KbdBdAddrStr, PSM=0x11)..."
     $cr = [L2cap]::connect($sock, [ref]$sa, $sasize)
+    # Read both error sources IMMEDIATELY before any other call —
+    # PowerShell intermediate operations can clear LastError.
+    $errWsa = [L2cap]::WSAGetLastError()
+    $errMar = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    L ("connect() returned: {0}  (WSAGetLastError={1}  Marshal.GetLastWin32Error={2})" -f $cr, $errWsa, $errMar)
     if ($cr -ne 0) {
-        $err = [L2cap]::WSAGetLastError()
+        # Use whichever error source is non-zero
+        $err = if ($errWsa -ne 0) { $errWsa } else { $errMar }
         $name = switch ($err) {
+            0     { '(LastError cleared — PowerShell P/Invoke quirk; cr was non-zero so something failed)' }
             10013 { 'WSAEACCES (still owned somehow)' }
             10048 { 'WSAEADDRINUSE' }
             10050 { 'WSAENETDOWN' }
@@ -390,12 +412,48 @@ finally {
     if ($hidDisabled) {
         L ""
         L "Re-enabling HID profile..."
-        $rc2 = [BtApi]::BluetoothSetServiceState($hRadio, [ref]$devInfo, [ref]$hidGuid,
+
+        # The DISABLE→connect→ENABLE sequence may invalidate the in-memory
+        # BLUETOOTH_DEVICE_INFO struct (Windows can re-enumerate the device
+        # behind us). Re-fetch it fresh before the ENABLE call so the kernel
+        # sees a current handle rather than a stale snapshot.
+        $reFreshDev = New-Object BtApi+BLUETOOTH_DEVICE_INFO
+        $reFreshDev.dwSize = [Runtime.InteropServices.Marshal]::SizeOf([Type]([BtApi+BLUETOOTH_DEVICE_INFO]))
+        $reSearch = New-Object BtApi+BLUETOOTH_DEVICE_SEARCH_PARAMS
+        $reSearch.dwSize = [Runtime.InteropServices.Marshal]::SizeOf([Type]([BtApi+BLUETOOTH_DEVICE_SEARCH_PARAMS]))
+        $reSearch.fReturnAuthenticated = 1
+        $reSearch.fReturnRemembered    = 1
+        $reSearch.fReturnUnknown       = 0
+        $reSearch.fReturnConnected     = 1
+        $reSearch.fIssueInquiry        = 0
+        $reSearch.cTimeoutMultiplier   = 0
+        $reSearch.hRadio               = $hRadio
+        $hRefresh = [BtApi]::BluetoothFindFirstDevice([ref]$reSearch, [ref]$reFreshDev)
+        $deviceForEnable = $devInfo  # default to the original
+        if ($hRefresh -ne [IntPtr]::Zero) {
+            do {
+                if ($reFreshDev.Address -eq $targetAddrUlong) {
+                    $deviceForEnable = $reFreshDev
+                    L "  re-fetched fresh device info for ENABLE"
+                    break
+                }
+            } while ([BtApi]::BluetoothFindNextDevice($hRefresh, [ref]$reFreshDev))
+            [BtApi]::BluetoothFindDeviceClose($hRefresh) | Out-Null
+        } else {
+            L "  re-fetch failed; using stale device info (may fail)"
+        }
+
+        $rc2 = [BtApi]::BluetoothSetServiceState($hRadio, [ref]$deviceForEnable, [ref]$hidGuid,
             [BtApi]::BLUETOOTH_SERVICE_ENABLE)
         if ($rc2 -ne 0) {
             L "BluetoothSetServiceState(ENABLE) returned $rc2 — KEYBOARD MAY BE UNUSABLE."
-            L "Manual fix: Settings > Devices > Bluetooth > unpair/repair the keyboard,"
-            L "or run: pnputil /restart-device 'BTHENUM\Dev_$($KbdBdAddrStr -replace '[:]','')'"
+            if ($rc2 -eq 87) {
+                L "  err=87 (ERROR_INVALID_PARAMETER) often clears after a Bluetooth"
+                L "  radio toggle (Settings > Bluetooth > off/on) — try that first."
+            }
+            L "  Manual fix: Settings > Bluetooth > toggle radio off/on,"
+            L "  or unpair/repair the keyboard,"
+            L "  or run: pnputil /restart-device 'BTHENUM\Dev_$($KbdBdAddrStr -replace '[:]','')'"
         } else {
             L "HID profile re-enabled."
         }
