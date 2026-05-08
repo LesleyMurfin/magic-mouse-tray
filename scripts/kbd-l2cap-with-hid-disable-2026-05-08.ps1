@@ -80,6 +80,13 @@ public static class L2cap {
     public static extern int closesocket(IntPtr s);
     [DllImport("ws2_32.dll", SetLastError=true)]
     public static extern int WSAGetLastError();
+    [DllImport("ws2_32.dll", SetLastError=true)]
+    public static extern int setsockopt(IntPtr s, int level, int optname,
+        ref int optval, int optlen);
+
+    public const int SOL_SOCKET   = 0xFFFF;
+    public const int SO_RCVTIMEO  = 0x1006;
+    public const int SO_SNDTIMEO  = 0x1005;
 
     [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Ansi)]
     public struct WSADATA {
@@ -271,6 +278,13 @@ try {
         [L2cap]::WSACleanup() | Out-Null
         return
     }
+
+    # Set 5s recv/send timeouts so a misbehaving firmware can't hang the script
+    # with HID disabled. If recv times out we surface WSAETIMEDOUT (10060) and
+    # the finally block re-enables HID — keyboard usable again within seconds.
+    $timeoutMs = 5000
+    [L2cap]::setsockopt($sock, [L2cap]::SOL_SOCKET, [L2cap]::SO_RCVTIMEO, [ref]$timeoutMs, 4) | Out-Null
+    [L2cap]::setsockopt($sock, [L2cap]::SOL_SOCKET, [L2cap]::SO_SNDTIMEO, [ref]$timeoutMs, 4) | Out-Null
 
     $sa = New-Object L2cap+SOCKADDR_BTH
     $sa.addressFamily  = [ushort][L2cap]::AF_BTH
