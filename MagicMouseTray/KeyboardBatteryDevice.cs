@@ -1,18 +1,22 @@
-// IBatteryDevice implementation for Apple Magic Keyboard.
+// IBatteryDevice implementation for Apple Wireless Keyboard (2011, PID=0x0239) and variants.
 //
-// Battery path status (empirical, 2026-05-07):
+// Device: Apple Wireless Keyboard A1314, 2011 ANSI/ISO/JIS revision (VID=0x05AC).
+// PID source: Linux kernel hid-apple.c (USB_DEVICE_ID_APPLE_ALU_WIRELESS_2011_*).
+//
+// Battery path status (empirical, 2026-05-07, exhaustive):
 //   col02: Input ValueCap RID=0x47 UP=0x0006/U=0x0020 (Battery Strength, BitSize=8, LogMax=255).
-//   FeatureReportByteLength=0 on col02 — no Feature reports; col03 has FeatLen=4 (RID=0x09 status only).
+//   FeatureReportByteLength=0 on col02/col01 — no Feature reports anywhere.
+//   col03 has FeatLen=4 but only RID=0x09 (status flag, not battery).
 //
-//   Paths ruled out:
-//   - HidD_GetInputReport on col02: causes BT disconnect — do NOT use. (HidBth Event 2, 15:59:38)
-//   - HidD_GetFeature on col02: FeatLen=0, err=1 (ERROR_INVALID_FUNCTION).
-//   - HidD_GetFeature on col03 RID=0x47: Feature report exists but RID 0x47 not present, err=1.
-//   - WinRT DeviceContainer BatteryLife: "Element not found" for all keyboard containers.
-//   - DEVPKEY battery props: all empty post-reconnect (Windows does not cache until keyboard sends).
-//   - ReadFile on col02 while connected: silent for 120s even with active key presses.
+//   ALL active read paths ruled out (tested as admin, all access modes, all collections):
+//   - HidD_GetInputReport: all 255 RIDs return err=87 — firmware does not support GET_REPORT.
+//   - HidD_GetFeature: FeatLen=0, err=1 on col01/col02; RID=0x47 absent on col03.
+//   - DeviceIoControl IOCTL_HID_GET_FEATURE: err=1784 — driver validates FeatLen=0 first.
+//   - ReadFile on col02 while connected: silent for 120s — device only pushes on BT connect.
+//   - WinRT DeviceContainer/BluetoothDevice BatteryLife: empty — Windows does not cache it.
+//   - VID=0x004C (BLE) path: keyboard has no BLE counterpart, Classic BT only.
 //
-//   Confirmed path: keyboard pushes RID=0x47 on col02 immediately after BT connection completes.
+//   Only viable path: keyboard pushes RID=0x47 on col02 interrupt IN pipe at BT connect time.
 //   Strategy: open col02 with FILE_FLAG_OVERLAPPED, wait up to 30s for the push, cache result.
 //   Static state persists battery across DeviceRegistry.Discover() calls (new instances per poll).
 
@@ -28,8 +32,16 @@ internal sealed class KeyboardBatteryDevice : IBatteryDevice
 
     internal static readonly VidPidEntry[] KnownKeyboards =
     [
-        new("000205AC", "PID&0239", "Magic Keyboard"),
+        // 2011 revision (A1314) — PID source: Linux kernel hid-apple.c
+        new("000205AC", "PID&0239", "Apple Wireless Keyboard (2011)"),
+        new("000205AC", "PID&023A", "Apple Wireless Keyboard (2011) ISO"),
+        new("000205AC", "PID&023B", "Apple Wireless Keyboard (2011) JIS"),
+        // Magic Keyboard (A1644, 2015+)
+        new("000205AC", "PID&024F", "Magic Keyboard"),
+        new("000205AC", "PID&0250", "Magic Keyboard ISO"),
+        // Magic Keyboard with Touch ID (A2449, 2021+)
         new("000205AC", "PID&0267", "Magic Keyboard with Touch ID"),
+        new("000205AC", "PID&026C", "Magic Keyboard with Touch ID ISO"),
     ];
 
     // Static: battery cache persists across DeviceRegistry.Discover() (new instance per poll).
