@@ -35,14 +35,12 @@ internal sealed class V3RecycleManager : IDisposable
 {
     internal event Action<int, string>? BatteryRead;
 
-    static readonly TimeSpan DefaultCadence    = TimeSpan.FromMinutes(15);
-    static readonly TimeSpan LowBatteryCadence = TimeSpan.FromMinutes(5);   // pct < 20%
     const int IdleThresholdMs    = 30_000; // 30s
     const int RetryDelayMs       = 500;
     const int MaxRetries         = 3;
     const int MaxRestoreAttempts = 3;      // FLIP:AppleFilter retries for Mode B restore
     const int ModeAVerifyMs      = 5_000;  // poll budget for Mode A + col02 DN_STARTED (empirical: ~16ms path + ~1000ms pipeline ready)
-    const int ModeBVerifyMs      = 5_000;  // poll budget for Mode B confirmation (mouhid is slow)
+    const int ModeBVerifyMs      = 8_000;  // poll budget for Mode B confirmation. LowerFilters is registry-based (set before disable+enable by FLIP:AppleFilter, available immediately). HID path settling after re-enable is ~1-4s empirically, 8s is conservative.
     const int ConsecutiveFailCap = 3;
     const int DailyFailCap       = 10;    // >10 failures in 24h → auto-disable
 
@@ -55,7 +53,11 @@ internal sealed class V3RecycleManager : IDisposable
     readonly Queue<DateTime> _failureTimestamps = new();
 
     readonly Config _config;
-    int _lastKnownPct = -1; // used to decide cadence
+    int _lastKnownPct = -1;
+    string _lastKnownDevice = "Magic Mouse 2024";
+
+    // Exposed for TrayApp tooltip — set after each cycle completes.
+    internal TimeSpan NextInterval { get; private set; } = DrainRateTracker.CeilingNormal;
 
     internal V3RecycleManager(Config config)
     {
@@ -72,6 +74,14 @@ internal sealed class V3RecycleManager : IDisposable
         _consecutiveFailures = 0;
         _failureTimestamps.Clear();
         Logger.Log("V3RECYCLE re-enabled by user");
+    }
+
+    // Force an immediate battery read cycle, bypassing idle wait.
+    // Used by the tray menu "Read Battery Now" action and for testing.
+    internal async Task ForceReadNowAsync()
+    {
+        Logger.Log("V3RECYCLE force-triggered by user");
+        await ExecuteRecycleCycle(_cts.Token);
     }
 
     public void Dispose()
@@ -95,8 +105,10 @@ internal sealed class V3RecycleManager : IDisposable
                     await ExecuteRecycleCycle(ct);
             }
 
-            var interval = _lastKnownPct is >= 0 and < 20 ? LowBatteryCadence : DefaultCadence;
-            Logger.Log($"V3RECYCLE next in {interval} pct={_lastKnownPct}");
+            var interval = DrainRateTracker.GetNextInterval(
+                _lastKnownDevice, _lastKnownPct, _config.Threshold, isV3: true);
+            NextInterval = interval;
+            Logger.Log($"V3RECYCLE next in {interval} pct={_lastKnownPct} rate={DrainRateTracker.GetDrainRatePctPerHour(_lastKnownDevice):F3}%/h");
             try { await Task.Delay(interval, ct); } catch { return; }
         }
     }
@@ -166,25 +178,32 @@ internal sealed class V3RecycleManager : IDisposable
 
             if (modeAReached)
             {
-                var devices = DeviceRegistry.Discover();
-                var v3 = devices.FirstOrDefault(d => d.Kind == DeviceKind.MagicMouseV3);
+                // In Mode A, both col01 (mouse) and col02 (vendor battery) HID paths are present.
+                // DeviceRegistry.Discover() returns the first VID/PID match — col01 may precede col02
+                // in SetupDi enumeration order. col01's UsagePage is the standard HID mouse page, so
+                // GetBatteryPercent() returns -1 silently (splitVendor=false). Target col02 explicitly.
+                var col02Path = HidNative.EnumerateHidPaths()
+                    .FirstOrDefault(p => IsV3Path(p) &&
+                        p.Contains("col02", StringComparison.OrdinalIgnoreCase));
 
-                if (v3 is not null)
+                if (col02Path is not null)
                 {
-                    deviceName = v3.DeviceName;
-                    // Retry within Mode A window: col02 DN_STARTED does not guarantee the
-                    // HID report pipeline is ready. Empirical: GLE=121 then GLE=21, success
-                    // at ~1000ms. 3 retries at 500ms avoids full flip-cycle retry overhead.
-                    for (int readTry = 1; readTry <= 3 && pct < 0; readTry++)
+                    deviceName = "Magic Mouse 2024";
+                    Logger.Log($"V3RECYCLE col02 path found: {col02Path}");
+                    var dev = new MouseBatteryDevice(col02Path, deviceName, DeviceKind.MagicMouseV3);
+                    // HID report pipeline may not be ready immediately after col02 DN_STARTED.
+                    // Empirical: GLE=121 (attempt 1) → GLE=21 (attempts 2-3) → success at ~1000ms.
+                    // 5 retries at 500ms covers 0–2500ms; readTry=3 (~1000ms) should succeed.
+                    for (int readTry = 1; readTry <= 5 && pct < 0; readTry++)
                     {
                         if (readTry > 1) Thread.Sleep(500);
-                        pct = v3.GetBatteryPercent();
+                        pct = dev.GetBatteryPercent();
                         Logger.Log($"V3RECYCLE battery read: device={deviceName} pct={pct} attempt={attempt} readTry={readTry}");
                     }
                 }
                 else
                 {
-                    Logger.Log($"V3RECYCLE COL02 not found in DeviceRegistry attempt={attempt}");
+                    Logger.Log($"V3RECYCLE col02 path not found in HID enumeration attempt={attempt}");
                 }
             }
 
@@ -208,9 +227,11 @@ internal sealed class V3RecycleManager : IDisposable
             if (pct >= 0)
             {
                 _lastKnownPct = pct;
+                _lastKnownDevice = deviceName;
                 _consecutiveFailures = 0;
+                DrainRateTracker.Record(deviceName, pct);
                 BatteryRead?.Invoke(pct, deviceName);
-                Logger.Log($"V3RECYCLE cycle SUCCESS pct={pct}");
+                Logger.Log($"V3RECYCLE cycle SUCCESS pct={pct} rate={DrainRateTracker.GetDrainRatePctPerHour(deviceName):F3}%/h hoursLeft={DrainRateTracker.GetHoursToThreshold(deviceName, pct, _config.Threshold):F1}");
                 return;
             }
 
@@ -335,24 +356,28 @@ internal sealed class V3RecycleManager : IDisposable
         }
     }
 
-    // --- P/Invoke: idle time detection ---
+    // --- Cursor-position idle detection ---
+    // GetLastInputInfo is system-wide: keyboard, any HID device, keep-alive apps all reset it.
+    // For recycle purposes we only care that the mouse cursor has not moved — if the cursor
+    // is stationary the mouse flip is safe regardless of other input activity.
 
     [DllImport("user32.dll")]
-    static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+    static extern bool GetCursorPos(out POINT lpPoint);
 
     [StructLayout(LayoutKind.Sequential)]
-    struct LASTINPUTINFO
-    {
-        public uint cbSize;
-        public uint dwTime; // GetTickCount() tick of last input event
-    }
+    struct POINT { public int X; public int Y; }
+
+    static POINT   _lastCursorPos;
+    static long    _lastCursorMoveTick = Environment.TickCount64;
 
     static int GetIdleMs()
     {
-        var info = new LASTINPUTINFO();
-        info.cbSize = (uint)Marshal.SizeOf<LASTINPUTINFO>();
-        if (!GetLastInputInfo(ref info)) return 0;
-        // Cast to uint before subtract to handle 32-bit tick count wraparound
-        return (int)((uint)Environment.TickCount - info.dwTime);
+        GetCursorPos(out var pos);
+        if (pos.X != _lastCursorPos.X || pos.Y != _lastCursorPos.Y)
+        {
+            _lastCursorPos = pos;
+            _lastCursorMoveTick = Environment.TickCount64;
+        }
+        return (int)(Environment.TickCount64 - _lastCursorMoveTick);
     }
 }

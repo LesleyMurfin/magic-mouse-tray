@@ -22,6 +22,10 @@ internal sealed class TrayApp : IDisposable
     // Cleared when no devices are detected (empty name from AdaptivePoller).
     readonly Dictionary<string, int> _deviceBatteries = new(StringComparer.OrdinalIgnoreCase);
 
+    // Per-device menu items for live battery display in the right-click menu.
+    readonly Dictionary<string, ToolStripMenuItem> _deviceMenuItems = new(StringComparer.OrdinalIgnoreCase);
+    ToolStripMenuItem? _deviceSection;
+
     // Alert boundaries fired per-device this drain cycle. Cleared per-device when battery recovers.
     readonly Dictionary<string, HashSet<int>> _firedBoundaries = new(StringComparer.OrdinalIgnoreCase);
 
@@ -54,7 +58,7 @@ internal sealed class TrayApp : IDisposable
             Text = "Magic Mouse Battery — starting..."
         };
 
-        _poller = new AdaptivePoller();
+        _poller = new AdaptivePoller(_config);
         _poller.BatteryChanged += OnBatteryChanged;
         _poller.Start();
 
@@ -67,6 +71,11 @@ internal sealed class TrayApp : IDisposable
         out ToolStripMenuItem startupItem)
     {
         var menu = new ContextMenuStrip();
+
+        // --- Device battery status (dynamically updated) ---
+        _deviceSection = new ToolStripMenuItem("Devices") { Enabled = false };
+        menu.Items.Add(_deviceSection);
+        menu.Items.Add(new ToolStripSeparator());
 
         // --- Low Battery Threshold submenu ---
         var thresholdMenu = new ToolStripMenuItem("Low Battery Threshold");
@@ -138,6 +147,10 @@ internal sealed class TrayApp : IDisposable
         var refresh = new ToolStripMenuItem("Refresh Now");
         refresh.Click += (_, _) => _poller.RefreshNow();
         menu.Items.Add(refresh);
+
+        var readNow = new ToolStripMenuItem("Read Battery Now");
+        readNow.Click += (_, _) => _ = _recycleManager.ForceReadNowAsync();
+        menu.Items.Add(readNow);
 
         // --- Test Notification (debug only) ---
         var testToast = new ToolStripMenuItem("Test Notification");
@@ -264,13 +277,63 @@ internal sealed class TrayApp : IDisposable
                 return $"{kv.Key}: {pctStr}";
             });
             var joined = string.Join(" | ", parts);
-            var interval = AdaptivePoller.GetInterval(lowestPct);
+            // Show V3RecycleManager interval if v3 has a valid reading; otherwise AdaptivePoller
+            var hasV3Reading = _deviceBatteries.Any(kv =>
+                kv.Key.Contains("2024", StringComparison.OrdinalIgnoreCase) && kv.Value >= 0);
+            var interval = hasV3Reading ? _recycleManager.NextInterval : _poller.LastInterval;
             tip = $"{joined} · {FormatInterval(interval)}";
             if (_driverStatus != DriverStatus.Ok) tip = $"⚠ {tip}";
         }
 
         _tray.Text = tip.Length > 63 ? tip[..63] : tip;
         Logger.Log($"TRAY_UPDATE devices={_deviceBatteries.Count} lowest={lowestPct} tooltip=\"{_tray.Text}\"");
+        UpdateDeviceMenuItems();
+    }
+
+    void UpdateDeviceMenuItems()
+    {
+        if (_deviceSection is null) return;
+
+        if (_deviceBatteries.Count == 0)
+        {
+            _deviceSection.Text = "No devices detected";
+            return;
+        }
+
+        foreach (var kv in _deviceBatteries)
+        {
+            var pctStr = kv.Value switch {
+                >= 0 => $"{kv.Value}%",
+                -2   => "N/A (Mode B)",
+                _    => "—"
+            };
+
+            var rate = DrainRateTracker.GetDrainRatePctPerHour(kv.Key);
+            var rateStr = rate > 0.001 ? $"  {rate:F2}%/h" : string.Empty;
+            var label = $"{kv.Key}: {pctStr}{rateStr}";
+
+            if (!_deviceMenuItems.TryGetValue(kv.Key, out var item))
+            {
+                item = new ToolStripMenuItem(label) { Enabled = false };
+                _deviceMenuItems[kv.Key] = item;
+                // Insert before the separator that follows the device section
+                var sepIdx = _tray.ContextMenuStrip!.Items.IndexOf(_deviceSection) + 1;
+                _tray.ContextMenuStrip.Items.Insert(sepIdx, item);
+            }
+            else
+            {
+                item.Text = label;
+            }
+        }
+
+        // Remove stale items for devices no longer present
+        foreach (var key in _deviceMenuItems.Keys.Except(_deviceBatteries.Keys).ToList())
+        {
+            _tray.ContextMenuStrip?.Items.Remove(_deviceMenuItems[key]);
+            _deviceMenuItems.Remove(key);
+        }
+
+        _deviceSection.Text = $"Devices ({_deviceBatteries.Count})";
     }
 
     static string FormatInterval(TimeSpan t)
