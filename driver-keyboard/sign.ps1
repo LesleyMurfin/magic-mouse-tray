@@ -1,34 +1,42 @@
-# sign.ps1 — sign MagicKbDesc.sys + .cat with the M12 CN=MagicMouseFix cert.
-# Reuses the M12 trust path (cert already in TrustedPublisher).
+# sign.ps1 — sign MagicKbDesc.sys + .cat via mm-task-runner SIGN-FILE route.
+# Runs as SYSTEM (private-key access to LocalMachine\My). Pre: build.cmd has
+# staged the artifacts at C:\Windows\Temp\MagicKbDescStage\.
 
 $ErrorActionPreference = 'Stop'
+$thumb = '16940C0F937D569363560D5FEC5CD8FA6D6D9BCE'  # CN=MagicMouseFix in LocalMachine\My
+$stage = 'C:\Windows\Temp\MagicKbDescStage'
+$q     = 'C:\mm-dev-queue'
 
-$sysPath = Join-Path $PSScriptRoot 'x64\Release\MagicKbDesc\MagicKbDesc.sys'
-$catPath = Join-Path $PSScriptRoot 'x64\Release\MagicKbDesc\MagicKbDesc.cat'
+foreach ($f in @("$stage\MagicKbDesc.sys", "$stage\MagicKbDesc.cat")) {
+    if (-not (Test-Path $f)) { throw "$f not staged — run .\build.cmd first" }
+}
 
-foreach ($f in @($sysPath, $catPath)) {
-    if (-not (Test-Path $f)) {
-        throw "Build artifact missing: $f. Run build.ps1 first."
+function Sign-One($file) {
+    $nonce = 'sign-' + [guid]::NewGuid().ToString().Substring(0,8)
+    Set-Content "$q\request.txt" "SIGN-FILE|$nonce|$file|$thumb" -Encoding ASCII
+    Remove-Item "$q\result.txt" -Force -ErrorAction SilentlyContinue
+    schtasks /run /tn MM-Dev-Cycle | Out-Null
+    $deadline = (Get-Date).AddMinutes(2)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path "$q\result.txt") {
+            $r = (Get-Content "$q\result.txt" -Raw).Trim()
+            if ($r -match "\|$nonce") {
+                Write-Host "  $file -> $r"
+                return [int]($r -split '\|')[0]
+            }
+        }
+        Start-Sleep -Milliseconds 500
     }
+    Write-Host "  TIMEOUT $file" -ForegroundColor Red
+    return 124
 }
 
-# Reuse M12 thumbprint (CN=MagicMouseFix) — see sign-and-install.ps1.
-$thumb = 'B902C2864315E2DE359450024768CE7D01715C38'
-$timestampUrl = 'http://timestamp.digicert.com'
-$signtool = 'F:\Program Files\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe'
+$rc1 = Sign-One "$stage\MagicKbDesc.sys"
+$rc2 = Sign-One "$stage\MagicKbDesc.cat"
 
-if (-not (Test-Path $signtool)) {
-    throw "signtool.exe not found at $signtool. EWDK ISO mounted at F:\?"
+if ($rc1 -ne 0 -or $rc2 -ne 0) {
+    throw "Sign failed (sys=$rc1 cat=$rc2)"
 }
 
-foreach ($f in @($sysPath, $catPath)) {
-    Write-Host "Signing $f ..."
-    & $signtool sign /sm /sha1 $thumb /fd sha256 /tr $timestampUrl /td sha256 /v $f
-    if ($LASTEXITCODE -ne 0) {
-        throw "signtool failed on $f (exit=$LASTEXITCODE)"
-    }
-}
-
-Write-Host ""
-Write-Host "Signed. Verify with:"
-Write-Host "  & '$signtool' verify /pa $sysPath"
+Write-Host ''
+Get-AuthenticodeSignature "$stage\MagicKbDesc.sys" | Format-List Status,SignerCertificate

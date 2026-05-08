@@ -22,9 +22,12 @@ This driver intercepts `IOCTL_HID_GET_REPORT_DESCRIPTOR`, finds the `... 81 02 c
 | `MagicKbDesc.h` | Common types + IOCTL constants |
 | `MagicKbDesc.vcxproj` | MSBuild project for EWDK 10.0.26100 |
 | `MagicKbDesc.sln` | Solution wrapper |
-| `build.ps1` | Compiles via `mm-task-runner.ps1 BUILD` (existing M12 EWDK pipeline) |
-| `sign.ps1` | Signs with the M12 `CN=MagicMouseFix` cert (already in TrustedPublisher) |
-| `install.ps1` | `pnputil /add-driver MagicKbDesc.inf /install /force` |
+| `build.cmd` | EWDK msbuild → recover .sys → stamp INF → Inf2Cat. Stages to `C:\Windows\Temp\MagicKbDescStage\`. |
+| `sign.ps1` | Signs `.sys` + `.cat` via mm-task-runner SIGN-FILE route (SYSTEM context, M12 `CN=MagicMouseFix` cert in `LocalMachine\My`). |
+| `install.ps1` | `pnputil /add-driver` via mm-task-runner INSTALL-DRIVER route. `-Uninstall` switch removes. |
+| `restart-device.ps1` | `pnputil /restart-device` via mm-task-runner RESTART-DEVICE route. Forces PnP to re-evaluate driver bindings without a BT toggle. |
+| `test.ps1` | Smoke test — `HidD_GetFeature(Col02, RID=0x47, len=2)`. Expected: `*** SUCCESS *** [47 NN]   BATTERY = NN%`. |
+| `troubleshoot.ps1` | Comprehensive diagnostic dump: driver-store status, PnP stack, all HID caps, raw descriptor (looks for the `09 20 B1 02` patch bytes), signature on installed `.sys`, recent System event log. **Run this if `test.ps1` fails.** |
 
 ## Build prerequisite
 
@@ -32,10 +35,26 @@ EWDK ISO mounted at `F:\Program Files\Windows Kits\10\` (already configured for 
 
 ## Install (production trust path — no `bcdedit`)
 
+Open Admin PowerShell. From the `driver-keyboard/` directory:
+
 ```powershell
-.\build.ps1                                 # → driver/x64/Release/MagicKbDesc.{sys,cat,inf}
-.\sign.ps1                                  # → embeds signature + signs catalog with M12 cert
-pwsh .\install.ps1                          # → pnputil /add-driver /install
+.\build.cmd          # EWDK msbuild + stamp + cat → C:\Windows\Temp\MagicKbDescStage\
+.\sign.ps1           # SYSTEM-context sign with M12 cert
+.\install.ps1        # pnputil /add-driver via SYSTEM
+.\restart-device.ps1 # force re-bind (alternative: toggle BT off/on in Settings)
+.\test.ps1           # HidD_GetFeature(0x47) — expect SUCCESS with battery %
+```
+
+If anything fails:
+
+```powershell
+.\troubleshoot.ps1   # full diagnostic dump
+```
+
+To uninstall:
+
+```powershell
+.\install.ps1 -Uninstall
 ```
 
 After install, toggle Bluetooth off/on in Settings — the new lower filter binds during re-enumeration. Verify:
