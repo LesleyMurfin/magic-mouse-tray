@@ -8,9 +8,11 @@ namespace MagicMouseTray;
 // Never throws — all I/O errors are silently swallowed.
 internal static class Logger
 {
-    static readonly string LogPath = Path.Combine(
+    internal static readonly string LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "MagicMouseTray", "debug.log");
+
+    internal static string LogDir => Path.GetDirectoryName(LogPath)!;
 
     const long MaxBytes = 1024 * 1024; // 1 MB rotation threshold
     static readonly object Lock = new();
