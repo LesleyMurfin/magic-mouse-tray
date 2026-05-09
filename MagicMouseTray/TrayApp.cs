@@ -163,6 +163,17 @@ internal sealed class TrayApp : IDisposable
 
         menu.Items.Add(new ToolStripSeparator());
 
+        // --- Diagnostics ---
+        var openLogs = new ToolStripMenuItem("Open Logs");
+        openLogs.Click += (_, _) => OpenLogsInEditor();
+        menu.Items.Add(openLogs);
+
+        var openDiagFolder = new ToolStripMenuItem("Open Diagnostics Folder");
+        openDiagFolder.Click += (_, _) => OpenDiagnosticsFolder();
+        menu.Items.Add(openDiagFolder);
+
+        menu.Items.Add(new ToolStripSeparator());
+
         // --- Quit ---
         var quit = new ToolStripMenuItem("Quit");
         quit.Click += (_, _) =>
@@ -180,6 +191,66 @@ internal sealed class TrayApp : IDisposable
         _config.SetThreshold(value);
         foreach (var item in _thresholdItems)
             item.Checked = (int)item.Tag! == _config.Threshold;
+    }
+
+    // Opens debug.log in Notepad++ if installed, falls back to notepad.exe.
+    // Notepad++ tail-follows the file (Settings > Misc > File Status Auto-Detection).
+    void OpenLogsInEditor()
+    {
+        var logPath = Logger.LogPath;
+        if (!System.IO.File.Exists(logPath))
+        {
+            System.IO.Directory.CreateDirectory(Logger.LogDir);
+            System.IO.File.WriteAllText(logPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Log file created on demand from tray.\r\n");
+        }
+
+        var npp = FindNotepadPlusPlus();
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = npp ?? "notepad.exe",
+                Arguments = $"\"{logPath}\"",
+                UseShellExecute = true
+            };
+            System.Diagnostics.Process.Start(psi);
+            Logger.Log($"OPEN_LOGS editor={(npp ?? "notepad.exe")} path={logPath}");
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"OPEN_LOGS_FAIL err={ex.Message}");
+        }
+    }
+
+    void OpenDiagnosticsFolder()
+    {
+        try
+        {
+            System.IO.Directory.CreateDirectory(Logger.LogDir);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"\"{Logger.LogDir}\"",
+                UseShellExecute = true
+            });
+            Logger.Log($"OPEN_DIAG_FOLDER path={Logger.LogDir}");
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"OPEN_DIAG_FOLDER_FAIL err={ex.Message}");
+        }
+    }
+
+    static string? FindNotepadPlusPlus()
+    {
+        string[] candidates =
+        {
+            @"C:\Program Files\Notepad++\notepad++.exe",
+            @"C:\Program Files (x86)\Notepad++\notepad++.exe",
+        };
+        foreach (var c in candidates)
+            if (System.IO.File.Exists(c)) return c;
+        return null;
     }
 
     void OnBatteryChanged(int pct, string name)

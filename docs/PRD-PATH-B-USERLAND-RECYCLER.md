@@ -234,6 +234,7 @@ If recycle-to-Mode-A is non-deterministic at high frequency (e.g. <70% success),
 - [ ] Settings dialog: enable/disable v3 recycle (default off until first user request); polling intervals; idle-time threshold
 - [ ] Per-device colour-coded battery indicator (green >50%, yellow 20-50%, red <20%)
 - [ ] Tooltip with last-poll timestamp + manual refresh option
+- [x] **Open Logs / Open Diagnostics Folder menu items (2026-05-09)**: tray context menu adds two diagnostics shortcuts. `Open Logs` launches Notepad++ (`C:\Program Files\Notepad++\notepad++.exe` or `(x86)` fallback) on `%APPDATA%\MagicMouseTray\debug.log`, falling back to `notepad.exe` if Notepad++ isn't installed. `Open Diagnostics Folder` opens `%APPDATA%\MagicMouseTray\` in Explorer. Both create the directory if missing. Implemented in `TrayApp.cs` (`OpenLogsInEditor`, `OpenDiagnosticsFolder`, `FindNotepadPlusPlus`); `Logger.LogPath` promoted from `private` to `internal` to allow tray access.
 - **Exit criteria**: settings persisted to `Config.cs`; user can disable v3 recycler if scroll glitch is unacceptable
 
 ---
