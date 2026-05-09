@@ -102,7 +102,8 @@ if ($v3) {
 
 # 5. Optional BTHPORT cache restore
 if ($RestoreCache -and $CacheBackupHive -and (Test-Path $CacheBackupHive)) {
-    if ($v3 -and $v3.InstanceId -match '_VID&[^_]+_PID&\w+_([0-9A-Fa-f]{12})') {
+    # BTHENUM instance ID MAC: between '&0&' and '_C' suffix (validated 2026-05-09).
+    if ($v3 -and $v3.InstanceId -match '&0&([0-9A-Fa-f]{12})_C\d+$') {
         $mac = $matches[1].ToUpper()
         Write-Log "Restoring BTHPORT cache for MAC $mac from $CacheBackupHive"
         & reg.exe restore "HKLM\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices\$mac\Cache" $CacheBackupHive 2>&1 |

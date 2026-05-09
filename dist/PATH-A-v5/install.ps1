@@ -174,8 +174,12 @@ foreach ($line in $enumDrivers) {
         $current = $null
     }
 }
-Write-Log "  Apple oem*.inf in DriverStore: $($appleOemInfs -join ', ')"
-Write-Log "  Ours oem*.inf in DriverStore: $($ourOemInfs -join ', ')"
+Write-Log "  Apple applewirelessmouse.inf in DriverStore: $(if ($appleOemInfs) { $appleOemInfs -join ', ' } else { '(none — INCIDENT-2026-04-28 deletion still unrecovered, or never re-added)' })"
+Write-Log "  Ours MagicMouseFixV3.inf in DriverStore: $(if ($ourOemInfs) { $ourOemInfs -join ', ' } else { '(none — first install)' })"
+# Note: applewirelessmouse SERVICE may exist independently of the INF (per the
+# 2026-04-28 incident on this host: INF was deleted but service registration +
+# binary at System32\drivers\applewirelessmouse.sys remain). Our renamed
+# service+binary approach does not conflict with that residual state.
 
 # ====================================================================
 # DRY-RUN GATE
@@ -192,8 +196,11 @@ if (-not $Apply) {
 Write-Log "=== INSTALL ==="
 
 # 11. (S3) BTHPORT cache invalidation for v3 MAC
+# BTHENUM instance ID format (validated against live registry on user's host 2026-05-09):
+#   BTHENUM\{00001124-...}_VID&0001004C_PID&0323\9&<hash>&0&<MAC>_C00000000
+# MAC sits between '&0&' and '_C' suffix. Earlier draft used '_MAC' — wrong.
 foreach ($bt in ($bts | Where-Object { $_.InstanceId -match 'PID&0323' })) {
-    if ($bt.InstanceId -match '_VID&[^_]+_PID&\w+_([0-9A-Fa-f]{12})') {
+    if ($bt.InstanceId -match '&0&([0-9A-Fa-f]{12})_C\d+$') {
         $mac = $matches[1].ToUpper()
         $cachePath = "HKLM:\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices\$mac\Cache"
         if (Test-Path $cachePath) {
@@ -233,18 +240,27 @@ Start-Sleep -Seconds 12
 
 Write-Log "=== POST-INSTALL VERIFY ==="
 
-# 14. DEVPKEY_Device_DriverInfPath — confirm OUR oem*.inf is bound to v3
+# 14. Confirm our FILTER is in the v3 LowerFilters list — this is the
+# actually-relevant signal. Our INF is a FILTER install (Include=hidbth.inf,
+# Needs=HIDBTH_Inst.NT), so the FUNCTION DRIVER bound to v3 stays as hidbth
+# and DEVPKEY_Device_DriverInfPath may return 'hidbth.inf' / 'bth.inf' rather
+# than our oem*.inf. The signal that matters is whether MagicMouseFixV3 is
+# in the device's LowerFilters list.
 foreach ($bt in ($bts | Where-Object { $_.InstanceId -match 'PID&0323' })) {
     try {
         $boundInf = (Get-PnpDeviceProperty -InstanceId $bt.InstanceId -KeyName 'DEVPKEY_Device_DriverInfPath' -ErrorAction SilentlyContinue).Data
-        Write-Log "  v3 BTHENUM bound INF: $boundInf"
-        if ($boundInf -ieq 'MagicMouseFixV3.inf' -or ($ourOemInfs -contains $boundInf)) {
-            Write-Log "  PASS: our INF is bound" "OK"
+        Write-Log "  v3 BTHENUM function-driver INF: $boundInf (informational — may be inbox)"
+
+        $v3lf = (Get-PnpDeviceProperty -InstanceId $bt.InstanceId -KeyName 'DEVPKEY_Device_LowerFilters' -ErrorAction SilentlyContinue).Data
+        $v3lfStr = if ($v3lf) { $v3lf -join ', ' } else { '(none)' }
+        Write-Log "  v3 LowerFilters: $v3lfStr"
+        if ($v3lf -contains 'MagicMouseFixV3') {
+            Write-Log "  PASS: MagicMouseFixV3 in v3 LowerFilters" "OK"
         } else {
-            Write-Log "  FAIL: our INF is NOT bound (WHQL ranking may have won — see SRE-Windows S1/E_S3)" "ERROR"
+            Write-Log "  FAIL: MagicMouseFixV3 NOT in v3 LowerFilters (INF /add-driver may have failed to write HKR — check setupapi.dev.log)" "ERROR"
         }
     } catch {
-        Write-Log "  FAIL: could not read DEVPKEY_Device_DriverInfPath: $($_.Exception.Message)" "ERROR"
+        Write-Log "  FAIL: could not read DEVPKEY: $($_.Exception.Message)" "ERROR"
     }
 }
 
