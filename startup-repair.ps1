@@ -45,11 +45,21 @@ if ((Test-Path $LogFile) -and (Get-Item $LogFile).Length -gt $MaxLogBytes) {
 
 Write-Log "startup-repair: begin (WDF filter mode)"
 
-$knownPids = @("0323", "030d", "0269", "0310")
-$paramsTemplate = "HKLM:\SYSTEM\CurrentControlSet\Services\applewirelessmouse\Parameters"
+# PATH-A v5 SRE-Windows fix (S2): only v3 (PID 0323) has multi-TLC enumeration.
+# v1 (030D), v2 (0269), and 0310 use a single TLC and don't have COL02/COL03.
+# Running the LowerFilter dance on those PIDs is what triggered BSOD #2 on
+# 2026-05-08 (failed v1 repair at 16:01:57 → 0xD1 NULL deref at 16:15:42).
+# Restrict the repair scope to v3 only.
+$knownPids = @("0323")
+$paramsTemplate = "HKLM:\SYSTEM\CurrentControlSet\Services\MagicMouseFixV3\Parameters"
 $anyRepaired = $false
 
 foreach ($mmPid in $knownPids) {
+    if ($mmPid -ne "0323") {
+        # Defensive guard: if the array is ever expanded, only v3 must run the repair.
+        Write-Log "PID 0x$($mmPid.ToUpper()): skip — only v3 (0323) supports multi-TLC repair (SRE-Windows v5 S2)"
+        continue
+    }
     # Find BTHENUM parent device (HID service UUID {00001124} only)
     $btDevice = Get-PnpDevice -ErrorAction SilentlyContinue |
         Where-Object { $_.InstanceId -match "BTHENUM" -and
@@ -87,8 +97,9 @@ foreach ($mmPid in $knownPids) {
         continue
     }
 
-    # Step 1: Verify WDF binary is present
-    $wdfBin = "C:\Windows\System32\drivers\applewirelessmouse.sys"
+    # Step 1: Verify our patched binary is present (PATH-A v5 renamed from
+    # applewirelessmouse.sys to MagicMouseFixV3.sys — see SRE-Windows v5 review S1).
+    $wdfBin = "C:\Windows\System32\drivers\MagicMouseFixV3.sys"
     $wdfItem = Get-Item $wdfBin -ErrorAction SilentlyContinue
     if (-not $wdfItem) {
         Write-Log "CRITICAL: $wdfBin missing - cannot repair without WDF binary"
@@ -109,11 +120,11 @@ foreach ($mmPid in $knownPids) {
         Write-Log "Step 2: EnableInjection=1 (OK)"
     }
 
-    # Step 3: Verify/set LowerFilters on Enum key
+    # Step 3: Verify/set LowerFilters on Enum key (PATH-A v5: MagicMouseFixV3, not applewirelessmouse).
     $lfEnum = (Get-ItemProperty -Path $btRegPath -Name LowerFilters -ErrorAction SilentlyContinue).LowerFilters
-    if (-not ($lfEnum -contains 'applewirelessmouse')) {
-        Write-Log "Step 3: Enum LowerFilters missing applewirelessmouse -- setting"
-        Set-ItemProperty -Path $btRegPath -Name LowerFilters -Value @("applewirelessmouse") -Type MultiString -ErrorAction SilentlyContinue
+    if (-not ($lfEnum -contains 'MagicMouseFixV3')) {
+        Write-Log "Step 3: Enum LowerFilters missing MagicMouseFixV3 -- setting"
+        Set-ItemProperty -Path $btRegPath -Name LowerFilters -Value @("MagicMouseFixV3") -Type MultiString -ErrorAction SilentlyContinue
     } else {
         Write-Log "Step 3: Enum LowerFilters OK ($($lfEnum -join ', '))"
     }
@@ -124,9 +135,9 @@ foreach ($mmPid in $knownPids) {
         $driverInstPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\$driverKey"
         if (Test-Path $driverInstPath) {
             $lfClass = (Get-ItemProperty $driverInstPath -Name LowerFilters -ErrorAction SilentlyContinue).LowerFilters
-            if (-not ($lfClass -contains 'applewirelessmouse')) {
+            if (-not ($lfClass -contains 'MagicMouseFixV3')) {
                 Write-Log "Step 3b: Class key LowerFilters missing -- setting"
-                Set-ItemProperty -Path $driverInstPath -Name LowerFilters -Value @("applewirelessmouse") -Type MultiString -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $driverInstPath -Name LowerFilters -Value @("MagicMouseFixV3") -Type MultiString -ErrorAction SilentlyContinue
             } else {
                 Write-Log "Step 3b: Class key LowerFilters OK"
             }
@@ -160,7 +171,7 @@ foreach ($mmPid in $knownPids) {
             Write-Log "WARNING: repair attempted - HID count=$hidAfterCount (need 3)"
             $hidAfter | ForEach-Object { Write-Log "  found: $($_.InstanceId)" }
             Write-Log "  Possible causes:"
-            Write-Log "    - applewirelessmouse.sys unsigned or wrong binary (run install-wdf-permanent.ps1)"
+            Write-Log "    - MagicMouseFixV3.sys unsigned or wrong binary (run dist/PATH-A-v5/install.ps1)"
             Write-Log "    - CN=MagicMouseFix cert not in LocalMachine\\TrustedPublisher"
             Write-Log "    - testsigning BCD not active (bcdedit /set testsigning on)"
         }
