@@ -1,0 +1,65 @@
+---
+session_id: 8dfc914c-2b40-4ccf-bdb1-f6d582a08a25
+date: 2026-05-08
+tier: T3
+scope: PATH-A v3 Test Plan v1.0 + Signing Divergence + Redo Plan
+notebook_id: e789e5e9-da23-4607-9a62-bbfd94bb789b
+notebook_name: PRD-184 — Magic Mouse 3 KMDF Driver (Scroll + Battery Coexistence)
+linked_prd: PRD-184
+linked_psn: PSN-0001
+sources_added:
+  - id: d1ef7960-5139-4ca3-935f-b7084053724c
+    title: PATH-A v3 Test Plan v1.0 (2026-05-08)
+    type: file
+  - id: 7b2dc91d-9ed6-45d4-9f8e-500484cfaae8
+    title: PATH-A Signing Divergence + Redo Plan (2026-05-08)
+    type: file
+  - id: c35fb091-f344-4212-9781-4bd81d16fe15
+    title: PATH-A v3 In-Session Empirical Evidence (2026-05-08)
+    type: text
+sources_used: 8
+verdict: CHANGES-NEEDED
+findings_count: 5
+findings:
+  - id: F1
+    severity: high
+    summary: "Scroll test (AC-A9) hasn't been run; PATH-A's whole premise unproven without manual scroll verification"
+    mitigation: "Test class 8 (scroll smoke test) — manual operator test pending"
+    addressed_in: docs/PATH-A-V3-TEST-PLAN.md v1.1
+  - id: F2
+    severity: high
+    summary: "Test plan ignores byte-removal risks; no test verifies Feature 0x47 + 0xFF02 vendor pad removal doesn't break legacy code paths"
+    mitigation: "New test class 17 — HidD_GetFeature(0x47) IOCTL probe on patched COL01"
+    addressed_in: docs/PATH-A-V3-TEST-PLAN.md v1.1 test class 17
+  - id: F3
+    severity: critical
+    summary: "Track A SHOWSTOPPER candidate: WHQL-corrupted-overlay on patched .sys may trigger Windows CI rejection (STATUS_INVALID_IMAGE_HASH) before CI falls back to the testsigned catalog"
+    mitigation: "Test class 20 (CI-probe pre-test = gate-zero) + dual-variant strategy (A1 overlay-intact preferred, A2 overlay-stripped fallback)"
+    addressed_in: docs/PATH-A-V3-TEST-PLAN.md v1.1 test class 20 + docs/PATH-A-SIGNING-DIVERGENCE.md NLM-F3 caveat section
+  - id: F4
+    severity: medium
+    summary: "Long-form usage (0a 01 00 0a 02 00) only verified post-delivery via HidP_GetCaps; HidBth.sys BT minidriver wire-format handling untested"
+    mitigation: "New test class 18 — long-form usage wire compatibility (100 consecutive HidD_GetInputReport(0x90) over 5min OR ETW HID-write trace)"
+    addressed_in: docs/PATH-A-V3-TEST-PLAN.md v1.1 test class 18
+  - id: F5
+    severity: high
+    summary: "Rollback procedures don't account for Fast Startup PFRO failure + BTHPORT cache poisoning"
+    mitigation: "Rollback section updated: powercfg /h off enforcement; new test classes 19 (Fast Startup explicit survival) + 21 (BTHPORT cache poison rollback)"
+    addressed_in: docs/PATH-A-V3-TEST-PLAN.md v1.1 Rollback section + test classes 19 and 21
+  - id: WEAKEST_ASSUMPTION
+    severity: critical
+    summary: "Same as F3 — leaving a mathematically invalid Microsoft WHQL Authenticode signature overlay on the .sys may trigger CI hard-block before the catalog is checked"
+followup_decisions:
+  - D-S17-11
+  - D-S17-12
+  - D-S17-13
+  - D-S17-14
+  - D-S17-15
+status: addressed
+followup_required: true
+followup_blocking_track_a: true
+notes: |
+  All 5 findings addressed in PATH-A-V3-TEST-PLAN.md v1.1 (5 new test classes added: 17, 18, 19, 20, 21).
+  Critical finding F3 requires empirical CI behavior testing before Track A bundle ships — gate-zero test class 20.
+  PRD-184 bumped to v1.29.0 with decisions D-S17-11..15 capturing the findings + mitigations.
+  PSN-0001 bumped to v2.3.0 with hypotheses H-024 (CI WHQL-overlay tolerance) and H-025 (PFRO Fast Startup reliability — REJECTED).
