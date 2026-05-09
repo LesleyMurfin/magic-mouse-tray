@@ -350,6 +350,53 @@ on PSM 0x11 is rejected. Two known workarounds:
 
 For a probe / proof-of-concept, the first workaround is acceptable.
 
+## Cross-device confirmation: V1 Magic Mouse uses the same battery protocol
+
+Captured `magic-mouse -v1_battery_with_restart.pklg` against the V1 Magic
+Mouse (`04:F1:3E:EE:DE:10`, VID `0x05AC` / PID `0x030D`) with the BT Debug
+Profile installed. PacketLogger natively decodes the steady-state poll
+identically to the keyboard:
+
+| Time (relative) | Direction | Bytes | Decoded |
+|---|---|---|---|
+| 3979.216 | host→mouse | `43 47` | GET_REPORT Feature, RID `0x47` |
+| 3980.173 | mouse→host | `A3 47 0F` | DATA Feature — **`BATTERY LEVEL 15%`** |
+| 3980.173 | host→mouse | `41 30` | GET_REPORT Input, RID `0x30` |
+| 3980.196 | mouse→host | `A1 30 00` | DATA Input — **`BATTERY STATUS OK`** |
+
+So the **steady-state battery query bytes are universal** across the Apple
+BT HID family. Same `0x47` Feature and `0x30` Input RIDs respond on both
+the keyboard and the mouse.
+
+The connect-time init differs by device:
+
+| Device | Init transactions (host → device) |
+|---|---|
+| **Keyboard** (PID `0x0239`) | one Set Feature: `53 4A 03` |
+| **V1 Magic Mouse** (PID `0x030D`) | sequence of vendor Set Features at gesture/sensitivity RIDs: `53 C6 01 12 01 2C` *(rejected with HANDSHAKE Error: Invalid Report ID)*, then `53 F1 DB`, `53 F8 01 37`, `53 D7 01`. None of those address battery; the firmware happily answers `43 47` without any host-issued init. The first attempt being **rejected by the firmware** also implies the host is doing some auto-discovery rather than reading from a known table. |
+
+**Implication for the Windows port:** the same probe script
+([scripts/kbd-l2cap-with-hid-disable-2026-05-08.ps1](../scripts/kbd-l2cap-with-hid-disable-2026-05-08.ps1))
+covers both devices. It now accepts `-BdAddr` and `-Device <keyboard|mouse|none>`
+parameters; for the mouse, run with `-Device none` (or `-Device mouse` —
+currently equivalent — skip the keyboard's `53 4A 03` init).
+
+```powershell
+# keyboard (default)
+.\kbd-l2cap-with-hid-disable-2026-05-08.ps1
+
+# V1 magic mouse (skip init; battery query is universal)
+.\kbd-l2cap-with-hid-disable-2026-05-08.ps1 -BdAddr 04:F1:3E:EE:DE:10 -Device none
+```
+
+**Open question:** does the keyboard *actually* require the `53 4A 03`
+init for `43 47` to work, or is it incidental (e.g., sniff-interval
+coordination)? The mouse capture suggests the firmware doesn't strictly
+require any host-issued init — the auto-discovery probe failed and
+battery still works. If true, the Windows port can drop the keyboard
+init step entirely. Test by running `-BdAddr E8:06:88:4B:07:41 -Device none`
+on Windows and seeing whether `43 47` still gets a valid response.
+
 ## Reproducibility
 
 To re-derive the macOS findings:
