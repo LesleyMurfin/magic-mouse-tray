@@ -34,6 +34,13 @@ EVT_WDF_IO_QUEUE_IO_INTERNAL_DEVICE_CONTROL  MagicKbDescEvtIoInternalDeviceContr
 // descriptor buffer; we patch the bytes here.
 EVT_WDF_REQUEST_COMPLETION_ROUTINE      MagicKbDescDescriptorCompletion;
 
+// Completion routine for IOCTL_HID_GET_DEVICE_DESCRIPTOR - bumps the
+// HID_DESCRIPTOR.DescriptorList[0].wReportLength by the number of bytes
+// we are about to insert into the report descriptor, so hidclass.sys
+// allocates a large-enough buffer for the subsequent
+// IOCTL_HID_GET_REPORT_DESCRIPTOR.
+EVT_WDF_REQUEST_COMPLETION_ROUTINE      MagicKbDescDeviceDescriptorCompletion;
+
 // Patch driver: returns the new buffer length, or 0 if no patch was
 // applicable (e.g. this collection's descriptor doesn't match Col02).
 // Patches in-place if buffer is large enough; otherwise the caller must

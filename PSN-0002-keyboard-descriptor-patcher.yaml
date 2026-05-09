@@ -1,0 +1,82 @@
+---
+title: PSN-0002 — Apple Wireless Keyboard HID Battery via Descriptor Patch (MagicKbDesc)
+type: problem-session-note
+psn_id: PSN-0002
+version: 0.1.0
+status: active
+linked_prd: PRD-185
+linked_repo: ReviveBusiness/magic-mouse-tray
+linked_issues: []
+opened: 2026-05-07
+last_updated: 2026-05-08
+sessions_logged: 2
+---
+
+# PSN-0002: Apple Wireless Keyboard HID Battery — Descriptor-Patch Kernel Filter
+
+## Problem Statement
+
+Apple Wireless Keyboard A1314 (PID `0x0239`, BT_Classic) cannot report its battery percentage on Windows. The keyboard firmware happily answers a `GET_REPORT(Feature, RID=0x47)` query over the L2CAP HID-Control PSM (`0x11`) — proven by macOS PacketLogger. But on Windows:
+
+- `HidD_GetFeature(Col02, RID=0x47, len=2)` returns `ERROR_INVALID_FUNCTION (1)` because `hidclass.sys`'s descriptor parse classifies RID `0x47` as Input only (`81 02` Main item) — the call never reaches the device.
+- Userland L2CAP `connect()` to PSM `0x11` is rejected by the Windows BT stack for paired HID devices (kernel ownership).
+- WinRT `Battery` GATT service is unimplemented on Apple keyboards over BT_Classic.
+
+Therefore the only viable path is a kernel-mode HID lower filter that intercepts `IOCTL_HID_GET_REPORT_DESCRIPTOR` and adds a `Feature` Main item (`09 20 B1 02`) for RID `0x47` to Col02. After the patch, `hidclass.sys` parses RID `0x47` as both Input and Feature; userland `HidD_GetFeature(0x47)` succeeds.
+
+Driver name: **MagicKbDesc**. Source: `driver-keyboard/`. PRD: `PRD-185`.
+
+## Current Working Theory
+
+The 4-byte descriptor patch (`09 20 B1 02` inserted before Col02's closing `c0 c0`) is a complete fix. The remaining work is making sure Windows PnP **binds** the filter onto the device on enumeration. Code path is correct; install path is the active issue.
+
+## Hypotheses
+
+| ID | Hypothesis | Status | Date Tested | Evidence |
+|----|-----------|--------|-------------|---------|
+| H-001 | Apple keyboard firmware answers `GET_REPORT(Feature, 0x47)` over L2CAP HID-Control PSM `0x11` | **CONFIRMED** | 2026-05-07 | macOS bluetoothd capture: `host→kbd 43 47` → `kbd→host A3 47 NN` with `NN = 0xC2` (65%) matching known battery state. See `docs/m4-bt-capture-findings.md`. |
+| H-002 | Userland L2CAP `connect()` on Windows can speak directly to PSM `0x11` | **REJECTED** | 2026-05-07 | `WSAConnect` returned `-1` with both error sources `0` for the paired keyboard. Windows BT stack holds exclusive ownership of HID PSMs once a device is paired. |
+| H-003 | A 4-byte descriptor patch (`09 20 B1 02`) flips `hidclass.sys`'s parse so RID `0x47` is also a Feature, unblocking `HidD_GetFeature` | **EVIDENCE STRONG, AWAITING IN-VIVO TEST** | 2026-05-08 | Bytes correctness verified against HID 1.11 §6.2.2 (re-emit Battery Strength Usage + Feature Main with current global state). Empirical proof pending M2 close-out. |
+| H-004 | An Extension INF (`Class = Extension`, `ExtensionId`, `AddReg HKR LowerFilters` in `[Inst.NT.HW]`) is the right install vehicle for this filter | **REJECTED** | 2026-05-08 | Setupapi log on `oem57.inf` install: `{Configure Driver Configuration: MagicKbDesc_Inst.NT} No associated service.` Service registered but PnP never bound the filter onto the BTHENUM device. Root cause: Extension INFs do not declare a function-driver service relationship; they require an existing function-driver INF on the device that exposes a binding contract — `hidbth.inf` does not. |
+| H-005 | The canonical function-driver-with-filter INF — `Include = hidbth.inf`, `Needs = HIDBTH_Inst.NT` (+ `Needs = HIDBTH_Inst.NT.Services`), `LowerFilters = MagicKbDesc` directly in `[Inst.NT]` — binds the filter on enumeration | **TESTING** | 2026-05-08 | Pattern matches the reference project `MagicMouse2DriversWin11x64-master` which is empirically known to work on the same Windows version with the same trust path. INF reverted to this format; reinstall in progress after `oem44`/`oem57` cleanup. |
+| H-006 | BT toggle off/on in Settings is sufficient to trigger `IOCTL_HID_GET_REPORT_DESCRIPTOR` re-issue and pick up the filter | **NOT YET TESTED** | — | If hidbth caches the descriptor across BT cycles, may need `pnputil /disable-device` + `/enable-device` on the BTHENUM PDO instead. |
+| H-007 | The same `CN=MagicMouseFix` M14 cert (PRD-184 PATH-A) accepts MagicKbDesc on the same machine without re-installing trust | **CONFIRMED** | 2026-05-08 | `sc start MagicKbDesc` returned `STATE: 4 RUNNING` after `Inf2Cat` + `signtool sign /sm /sha1 16940C0F... /fd SHA256` (catalog-only signing per PATH-A doctrine). Kernel CI accepted the catalog. |
+
+## Decisions Made
+
+(Decisions are tracked authoritatively in `Personal/prd/185-...md` § Decisions; replicated here for session-log continuity.)
+
+| ID | Date | Decision | Status |
+|----|------|----------|--------|
+| D-001 | 2026-05-07 | Kernel filter is the path, not userland L2CAP | active |
+| D-002 | 2026-05-07 | 4-byte descriptor patch (`09 20 B1 02`) for RID `0x47` Col02 | active |
+| D-003 | 2026-05-08 | Catalog signing only; never re-sign `.sys` directly | active |
+| D-004 | 2026-05-08 | Reuse PRD-184's `CN=MagicMouseFix` M14 cert | active |
+| D-005 | 2026-05-08 | Function-driver-with-filter INF, not Extension INF | active |
+| D-006 | 2026-05-08 | Skip Python M0–M3 milestones; kernel filter is the only path | active |
+
+## Anti-Patterns Captured
+
+- **AP-K01 — Don't use Extension INFs to attach a HID lower filter to a `hidbth.inf` device.** Extension INFs need an existing function-driver INF that exposes a binding contract; `hidbth.inf` does not. Use the canonical function-driver-with-filter pattern (`Include = hidbth.inf` + `Needs = HIDBTH_Inst.NT`).
+- **AP-K02 — Don't manually inject `LowerFilters` into the device's `Device Parameters` registry key as a substitute for an INF install.** PnP needs both the INF metadata *and* the registry value; setting only the registry value gives you a value PnP ignores at enumeration.
+- **AP-K03 — Don't sign `.sys` directly under PATH-A doctrine.** Sign the `.cat`; let the `.sys` keep its build-time signature. Re-signing the `.sys` strips Microsoft's overlay (see `docs/PATH-A-SIGNING-DIVERGENCE.md`).
+
+## Next Session Brief
+
+Resume install cycle after both stale `oem##.inf` entries are cleared (post-reboot for `oem57`):
+
+1. Confirm `pnputil /enum-drivers | findstr /I MagicKbDesc` shows nothing.
+2. Build via `mm-task-runner.ps1 BUILD` — produces `MagicKbDesc.{sys,cat,inf}` from the worktree's canonical INF.
+3. Sign catalog via `mm-task-runner.ps1 SIGN-FILE` (M14 cert, `CN=MagicMouseFix`).
+4. Install via `mm-task-runner.ps1 INSTALL-DRIVER` (`pnputil /add-driver MagicKbDesc.inf /install /force`).
+5. BT toggle off/on (or `pnputil /disable-device` + `/enable-device` on the BTHENUM PDO if BT toggle alone isn't enough — H-006).
+6. Verify `Get-PnpDeviceProperty -KeyName DEVPKEY_Device_Stack` lists `\Driver\MagicKbDesc`.
+7. Run `driver-keyboard/test.ps1` — expect `*** SUCCESS *** [47 NN]   BATTERY = NN%`.
+8. If success: open M4 (24h soak). If failure: capture setupapi log + driver state, query NLM, iterate.
+
+## Session History
+
+| Date | Session | What Happened |
+|------|---------|---------------|
+| 2026-05-07 | S1 | macOS L2CAP capture decoded; userland L2CAP confirmed blocked; kernel filter chosen. KMDF scaffold (PR #38) + descriptor patch logic + EWDK build + INF + sign script (PR #40). |
+| 2026-05-08 | S2 | First install attempt with Extension-INF format (`oem57.inf`) — service registers, but no filter binding ("no associated service" in setupapi log). Diagnosis: H-004 rejected. Reverted to canonical function-driver-with-filter INF (H-005). `oem44` uninstalled, `oem57` marked for uninstall (reboot pending). PRD-185 written. PSN-0002 opened. README updated. M4-DRIVER-PATCH-TIMELINE engineering log written. |
