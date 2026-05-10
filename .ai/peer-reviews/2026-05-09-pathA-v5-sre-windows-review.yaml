@@ -1,0 +1,580 @@
+---
+session_id: sre-windows-2026-05-09-v5-independent-review
+date: 2026-05-09
+reviewer: /sre-windows (independent, fresh-context — instructed to NOT anchor on prior reviews)
+tier: T2
+scope: PATH-A v5 INF Install Plan — independent technical review of design doc
+linked_design_doc: docs/PATH-A-V5-INF-INSTALL-DESIGN.md
+linked_prd: PRD-184 v1.31.0
+linked_psn: PSN-0001 v2.4.0
+sources_used:
+  - docs/PATH-A-V5-INF-INSTALL-DESIGN.md (design under review)
+  - docs/PATH-A-V3-BSOD-RCA.md (BSOD #2 minidump analysis)
+  - docs/PATH-A-SIGNING-DIVERGENCE.md (overlay/cat signing model)
+  - docs/SESSION-16-GHIDRA-DESCRIPTOR-TRACE.md (F1/F2/F3 architecture, descriptor source location)
+  - docs/SESSION-19-V3-BUF2-CONFIRMED-2026-05-08.md (battery delivery empirical)
+  - .ai/rev-eng/08f33d7e3ece/findings.md (binary structure)
+  - .ai/rev-eng/08f33d7e3ece/contexts/0x47.txt (Feature 0x47 callsites)
+  - .ai/rev-eng/08f33d7e3ece/contexts/0x90.txt (RID 0x90 callsites)
+  - .ai/rev-eng/08f33d7e3ece/contexts/0x105.txt (BRB sequence at +0x105 helper)
+  - .ai/rev-eng/08f33d7e3ece/contexts/0x410003.txt (4 populator paths in F2)
+  - .ai/rev-eng/08f33d7e3ece/contexts/brb-handler-candidates.txt
+  - /mnt/c/mm-dev-queue/AppleWirelessMouse.inf (our v5 INF)
+  - /mnt/d/.../MagicMouse2DriversWin11x64-master/AppleWirelessMouse/AppleWirelessMouse.inf (reference INF)
+  - startup-repair.ps1 (current PID iteration logic)
+
+verdict: REJECT
+verdict_strength: high_confidence_on_structural_findings_low_confidence_on_root_cause
+
+bluf: |
+  v5 plan has TWO structural defects that make the "v3-only isolation" claim
+  mechanically false: (1) the v5 INF reuses the stock service name
+  "applewirelessmouse" with ServiceBinary at the canonical %12% path, so v1's
+  stack still loads the patched binary regardless of Hardware-ID-only INF binding;
+  (2) Apple's stock oem10.inf is WHQL-signed, which outranks our TrustedPublisher
+  catalog under Microsoft's documented driver selection ranking, so PnP may not
+  even bind our INF to v3 without /install /force + post-install verification.
+
+  Separately, the BSOD root cause is LOCALIZED but not IDENTIFIED. The crash
+  is in F2 (IOCTL 0x410003 completion callback at +0x9e60), which is
+  byte-identical between stock and patched binaries. The 116-byte descriptor
+  patch at file 0xA850 is consumed by F3 (SDP descriptor injection), which is
+  a separate code path. The mechanism by which a descriptor change causes a
+  NULL+len=4 state in F2's BRB context struct is not yet understood. Until it
+  is, v5 install cannot be assumed safe even on v3 alone.
+
+  Recommendation: do not install the v5 bundle as structured. Required changes
+  + empirical pre-tests below. The user's stated risk tolerance (BSOD = ~30min
+  recovery on the only test machine) is incompatible with proceeding on the
+  current plan.
+
+independent_root_cause_analysis:
+  approach: |
+    Read the disasm at +0x9e60..+0x9f33 directly. Inspected the four populator
+    callsites in F2 (IOCTL 0x410003) at lines 1113, 1343, 1530, 1704 of
+    contexts/0x410003.txt. Cross-referenced with the F1/F2/F3 architecture
+    documented in SESSION-16-GHIDRA-DESCRIPTOR-TRACE.md. Did not anchor on
+    H-027c, H-028, or H-029 hypotheses.
+
+  what_the_disasm_actually_says: |
+    Crash function entry at +0x9e60 (file 0x8860, NONPAGE section). It is a
+    completion-style callback registered as the I/O target completion routine
+    by the F2 BRB-submit pattern (see all four populators — each writes a
+    constant `0x410003` at offset -0x30 from the BRB array tail, registers a
+    completion routine, and submits via WdfRequestSend / WdfIoTargetSendSynchronously
+    at the indirect call slot 0x14000b088).
+
+    The callback path:
+      rsi = *(*(call2_result + 0xb8) + 8)    ; one entry from the BRB array
+      ecx = [rsi + 0x84]                      ; declared length
+      if ecx < 2: bail
+      rax = [rsi + 0x88]                      ; buffer ptr (loading the ptr is a NON-fault even if NULL)
+      if ecx == 4:
+        cmp byte ptr [rax], 0xA1              ; *** crash if rax == NULL — bytes are A1 13 00 83
+        ...
+
+    The struct at rsi has a {length:0x84, ptr:0x88} pair. All four populators
+    write BOTH atomically (single-threaded code, no interruption). Anomalous
+    state {len=4, ptr=NULL} cannot arise from a single-shot populator —
+    something else writes that state.
+
+  candidates_for_what_creates_NULL_with_len_4:
+    - id: C1
+      hypothesis: "A 5th caller exists outside the four populators I traced and writes len without ptr."
+      evidence_for: |
+        contexts/0x410003.txt only shows the four most-obvious sites. There
+        could be initialization paths or error handlers that touch [rbp+0x84]
+        without ALSO writing [rbp+0x88]. Need to grep more aggressively.
+      evidence_against: "None — not yet investigated."
+    - id: C2
+      hypothesis: "Completion-side cleanup nulls [rsi+0x88] (frees the buffer) but doesn't zero [rsi+0x84]. A second/spurious callback fires on the same struct."
+      evidence_for: |
+        Heap-corruption BSOD #1 (0x13A LFH delay-free) is consistent with a
+        buffer being freed twice or freed+used. If [rsi+0x88] is the freed
+        buffer ptr and [rsi+0x84] is stale length, a second invocation of the
+        callback would crash exactly this way.
+      evidence_against: |
+        BRB completion routines are not typically called twice. Would need a
+        cancel + re-completion path or a queue management bug.
+    - id: C3
+      hypothesis: "BRB cancellation path leaves struct half-initialized."
+      evidence_for: |
+        At +0x1400020aa the code checks for STATUS_PENDING (0x103) and waits.
+        If BRB is cancelled before the wait completes, the struct may be torn
+        down differently from the success path.
+      evidence_against: "Not observed in disasm; speculation."
+    - id: C4
+      hypothesis: |
+        BT stack callback fires asynchronously on the SAME struct from a different
+        context. The struct's lifecycle is bound to the BRB queue array
+        ([ctx + 0xb8]) and a LATER BRB queued in the same array slot may have
+        a completion routine that runs on the prior struct.
+      evidence_for: |
+        The populator pattern at file 0x80a9 / file 0x209d / etc. shows that
+        [rbx+0xb8] is INCREMENTED across multiple BRB submissions in the same
+        sequence. If the increment-vs-completion ordering is wrong, completions
+        could land on stale entries.
+      evidence_against: "Not directly demonstrated."
+
+  why_descriptor_patch_could_trigger_F2_when_F2_is_unchanged: |
+    The descriptor patch changes what HidBth caches and what child PDOs
+    enumerate (COL01 mouse + COL02 vendor battery vs single TLC). This
+    indirectly changes:
+      - Number of HID child opens HidBth performs against the BTHENUM parent
+      - Which RID values are queried via Feature/Input requests
+      - SDP attribute response sizes during initial connection
+    Any of these CAN feed back into F2's IOCTL 0x410003 BRB queries via the
+    Apple gesture engine or device class identifier handlers. F2 is byte
+    -identical, but its INPUTS (the BT stack state, the device's responses
+    to Apple's queries) change. The patched descriptor is upstream; F2 is
+    downstream. Bug in F2 + patched-descriptor-input = crash.
+
+  confidence_in_root_cause:
+    structural_finding_F2_not_F3: HIGH
+      - "F2 byte-identical between stock and patched (descriptor patch only changes file 0xA850 / .data)."
+      - "Crash function +0x9e60 is the IOCTL 0x410003 completion callback per disasm."
+      - "F3 (SDP descriptor injection at VA 0x14000a440) is a different code path — confirmed by Session 16 trace."
+    specific_mechanism_creating_NULL_plus_len_4: LOW
+      - "Cannot identify from static analysis alone. Need ETW tracing of BRB queue events under reproducible conditions."
+      - "All four populators write atomically; the bug is in how the struct is later mutated, freed, or re-entered."
+    is_it_a_race_or_deterministic_state_machine_bug: UNDETERMINED
+      - "Race hypothesis is plausible but not proven. Could equally be a deterministic edge case in lifecycle management."
+
+open_questions_assessment:
+  - id: OQ1
+    question: "DriverStore precedence: which INF wins for PID 0x0323 when both stock oem10.inf (WHQL) and our v3-only INF (TrustedPublisher) are present?"
+    independent_answer: |
+      Per Microsoft's driver-selection rank (composite of hardware-ID
+      specificity + signature class), WHQL Authenticode (signature class
+      0x0000) outranks third-party Authenticode in TrustedPublisher
+      (signature class 0x2000) for the same hardware ID match. Therefore
+      Apple's stock oem10.inf likely wins over our v3-only INF for PID
+      0x0323 EVEN WITH our more-specific Hardware ID.
+
+      Hardware ID specificity (more specific = better) is one component;
+      signature class is another. WHQL-signed catalogs sit in the highest
+      trust bucket. This is documented in MSDN "How Setup Selects Drivers"
+      (search: "DriverDate" + "Signed Driver Rank" or "SPDRP_DRIVER_VERSION").
+    impact_on_plan: HIGH
+    proposed_change: |
+      Empirically test on a probe machine (NOT the user's daily driver).
+      After /add-driver /install, query
+      `Get-PnpDeviceProperty -InstanceId <v3-bthenum> -KeyName DEVPKEY_Device_DriverInfPath`
+      to confirm OUR oem<NN>.inf is bound. If stock keeps winning, use
+      `pnputil /add-driver <our-inf> /install /force` to force replacement.
+      Verify post-install with the same query.
+    verdict: rejected — needs empirical confirmation before install
+
+  - id: OQ2
+    question: "v1 isolation: with our v3-only INF + stock oem10.inf both present, will v1 (PID 030D) bind to the patched filter?"
+    independent_answer: |
+      MAJOR FLAW IN PLAN. Reading our v5 INF
+      (/mnt/c/mm-dev-queue/AppleWirelessMouse.inf) and Apple's stock INF
+      (/mnt/d/.../MagicMouse2DriversWin11x64-master/.../AppleWirelessMouse.inf)
+      side by side reveals:
+
+        Both INFs:
+          - Use service name: "applewirelessmouse"
+          - ServiceBinary: %12%\applewirelessmouse.sys
+          - HKR LowerFilter:  "applewirelessmouse"
+          - Same AddService section
+
+      Service registrations are GLOBAL by name. Once our INF installs, the
+      service "applewirelessmouse" gets ImagePath pointing to our DriverStore
+      copy of the patched binary, and the stock binary at System32\drivers\
+      gets overwritten.
+
+      v1's stack:
+        - PnP picks Apple's stock oem10.inf for PID 030D (we don't claim 030D)
+        - Stock INF says: "load LowerFilter named applewirelessmouse"
+        - PnP looks up service "applewirelessmouse" → ImagePath → loads OUR
+          patched binary
+        - => v1 STILL loads the patched filter
+
+      The v3-only Hardware ID binding controls only WHICH INF wins for
+      device-stack construction. It does NOT isolate the binary that the
+      LowerFilter service actually loads. The two are decoupled because
+      Apple's stock INF's HKR-spec for v1 names the same service that we
+      now own.
+
+      The reference project (MagicMouse2DriversWin11x64-master) does not
+      have this problem because their .sys is byte-identical to stock — they
+      can safely share Apple's service name. Ours cannot.
+    impact_on_plan: CRITICAL
+    proposed_change: |
+      Rename service AND binary in our INF:
+        Old: AddService = applewirelessmouse,, AppleWirelessMouse_Service_Inst
+             ServiceBinary = %12%\applewirelessmouse.sys
+        New: AddService = MagicMouseFixV3,, MagicMouseFixV3_Service_Inst
+             ServiceBinary = %12%\MagicMouseFixV3.sys
+        And: HKR,,"LowerFilters",0x00010000,"MagicMouseFixV3"
+      Rename the .sys file in the bundle to MagicMouseFixV3.sys. Regenerate
+      the cat to hash MagicMouseFixV3.sys. Now v1's stack loads stock
+      applewirelessmouse.sys (untouched), v3's stack loads MagicMouseFixV3.sys
+      (our patched binary).
+    verdict: rejected — plan as written cannot achieve its stated isolation
+
+  - id: OQ3
+    question: "WHQL overlay corruption tolerance under Windows Code Integrity?"
+    independent_answer: |
+      Genuinely unknown. PSN-0001 H-024 lists this as "NOT YET TESTED". The
+      reference project doesn't patch the .sys, so the canonical pattern
+      doesn't actually exercise this case in production. Whether CI rejects
+      with STATUS_INVALID_IMAGE_HASH on the embedded Authenticode signature
+      BEFORE falling back to the testsigned .cat is empirical-only.
+
+      Two plausible CI behaviors:
+        - PE first, cat fallback: CI examines embedded sig, sees corrupted
+          hash, fails with INVALID_IMAGE_HASH, never checks cat
+        - cat first, PE supplemental: CI examines cat, sees valid testsigned
+          hash matching the patched bytes, accepts
+      Microsoft's CI internals favor model B with testsigning ON +
+      TrustedPublisher cert installed, but variants exist (e.g., when HVCI is
+      on, PE checks may be stricter).
+    impact_on_plan: HIGH
+    proposed_change: |
+      Gate-zero CI-probe test on a probe machine (NOT user's daily driver):
+        1. Take stock f4ae407c .sys
+        2. Patch a SINGLE benign byte at file offset within .data (NOT in F3's
+           descriptor region — pick somewhere harmless, e.g. a string
+           padding byte)
+        3. Generate cat covering the patched .sys, sign with MagicMouseFix
+        4. Try install via pnputil /add-driver
+        5. Observe: does PnP load the driver? Does it BSOD? Does it ImageHash-
+           reject with a signed installer-side error?
+      This isolates the CI behavior axis from the descriptor-patch axis.
+      Outcome dictates whether to ship overlay-intact or overlay-stripped.
+    verdict: pending empirical answer — must complete BEFORE primary install
+
+  - id: OQ4
+    question: "BTHPORT SDP cache invalidation needed?"
+    independent_answer: |
+      Probably yes, per Session 16 SESSION-16-GHIDRA-DESCRIPTOR-TRACE.md
+      recommendation step 4: "Clear BTHPORT cache for the device MAC before
+      testing." Cached SDP responses can persist across driver replacement
+      because HidBth cache lives in kernel pool, not in the driver image.
+
+      Without invalidation, the patched filter may run but HidBth may serve
+      a previously-cached unfiltered descriptor for the v3 device, defeating
+      the test or producing inconsistent results.
+    impact_on_plan: MEDIUM
+    proposed_change: |
+      Add to install procedure step 4 ("Bind to v3 device"):
+        4a. Identify v3 MAC: $mac = (Get-PnpDevice -InstanceId <v3-bthenum>) | … find Service & Mac
+        4b. Remove cache: Remove-Item -Recurse -Force HKLM:\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices\$mac\Cache
+            (or rename it; restoration on rollback)
+        4c. THEN pnputil /restart-device
+    verdict: rejected as written — needs cache step
+
+  - id: OQ5
+    question: "Race condition concern: would v3-alone (no v1 cross-fire) still BSOD over a 72h soak?"
+    independent_answer: |
+      Cannot answer without dynamic data. My static analysis identifies the
+      crash struct and the four atomic populators but cannot determine how
+      [rsi+0x84]=4 + [rsi+0x88]=NULL becomes possible. Plausible mechanisms
+      include single-threaded state-machine bugs, BRB cancellation paths, and
+      asymmetric callback re-entry.
+
+      Empirical: Session 19 PacketLogger confirmed battery delivery on v3
+      via patched filter. That session ran for an unknown duration without
+      BSOD'ing during the test window. But BSOD #1 fired ~60h after applewirelessmouse
+      load — so a short single-session test does not rule out the latent
+      state.
+    impact_on_plan: HIGH
+    proposed_change: |
+      72h soak on a probe machine is ideal but not feasible (user has only
+      one machine). Alternative: run static analysis pass D listed below
+      ("trace EVERY caller writing to [X+0x84] and [X+0x88]") and look for
+      any path that creates the NULL+len=4 state. If found, that's the
+      smoking gun and the fix may need to defang that path before install.
+      If NOT found in static analysis, increase confidence (but not
+      certainty) that the issue is upstream.
+    verdict: rejected — need static analysis pass D before install
+
+  - id: OQ6
+    question: "startup-repair.ps1 v1-detection logic: edge cases?"
+    independent_answer: |
+      Read the current startup-repair.ps1 (line 48):
+        $knownPids = @("0323", "030d", "0269", "0310")
+      This iterates ALL four PIDs. The HID count check requires `$hidCount >= 3`
+      (line 76-79). v1 (030D) physically has only 1 TLC; the count will always
+      be wrong → repair fires → LowerFilter dance on v1 → BSOD trigger.
+
+      Fixing this is straightforward (add `if ($mmPid -ne "0323") { continue }`
+      at top of the foreach), but is necessary not sufficient — only addresses
+      one specific trigger of BSOD #2. The underlying NULL-deref capability
+      in F2 remains.
+
+      Edge cases for PID detection:
+        - Re-pair: PID stays the same (it's the device firmware's, not pairing-
+          state-derived). Robust.
+        - MAC reuse: irrelevant — PID is per-device-firmware.
+        - Device replacement: each device has its own PID. Robust.
+        - Future Magic Mouse models: may have new PIDs not in $knownPids.
+          For NEW PIDs the script silently skips (continue). Conservative.
+
+      PID matching is fine. Hardware ID matching is overkill for this purpose.
+    impact_on_plan: NECESSARY but limited
+    proposed_change: |
+      Edit startup-repair.ps1 to skip non-v3 PIDs:
+        foreach ($mmPid in $knownPids) {
+            if ($mmPid -ne "0323") { continue }   # only v3 has multi-TLC; others use stock filter
+            ...
+        }
+      Or simpler: remove non-0323 PIDs from $knownPids entirely.
+    verdict: required change — but does not by itself make plan safe
+
+  - id: OQ7
+    question: "Reference project on multi-mouse system: does it cause issues on non-target Magic Mouse variants?"
+    independent_answer: |
+      Reference project's INF (just read) declares all four PIDs identically
+      to stock Apple INF: 030D, 0310, 0269, 0323. Their .sys is byte-identical
+      to stock f4ae407c. So on a multi-mouse system, the reference project
+      effectively reinstalls the SAME stock applewirelessmouse.sys (just via
+      a different oem<NN>.inf with their MagicMouseFix-signed cat). v1 + v3
+      both end up running the stock binary — same behavior as if Apple's
+      driver was installed normally. No conflict.
+
+      This is exactly WHY they don't have the service-name-collision problem
+      we have. Their .sys is identical, so service-name reuse is safe.
+    impact_on_plan: confirmation — supports my OQ2 finding
+    verdict: not applicable to our v5 plan structurally
+
+failure_modes_prior_analysis_missed:
+  - id: FM1
+    description: |
+      v1 cross-load via shared service name (not addressed by v3-only INF
+      Hardware ID binding). Most direct mechanism for BSOD #2 reproduction
+      under v5 install.
+    severity: CRITICAL
+  - id: FM2
+    description: |
+      WHQL ranking causes our INF to install but not bind. Plan would
+      "succeed" mechanically but produce no behavior change. Could mask
+      whether the patched binary actually loads on v3, leading to false
+      confidence on subsequent ramp-up actions.
+    severity: HIGH
+  - id: FM3
+    description: |
+      Heap corruption (BSOD #1) implicates use-after-free or double-free in
+      F2's BRB queue. Even if v5's 0xD1 NULL-deref is mitigated by some
+      install-side change, the heap-corruption mechanism may not be. ~60h
+      uptime is long enough that latent corruption could survive a full
+      24h soak undetected.
+    severity: HIGH
+  - id: FM4
+    description: |
+      Fast-Startup boot path (HiberbootEnabled=1) bypassed the SMSS phase
+      and consumed PFRO regkey without executing the rename (per H-025
+      REJECTED in PSN-0001). Even with INF-based install via pnputil, if
+      the user has Fast Startup enabled, post-install reboots may not
+      properly cycle the device stack. Plan should explicitly require
+      `powercfg /h off` before install AND before any reboot during install
+      flow.
+    severity: MEDIUM
+  - id: FM5
+    description: |
+      pairing/reconnect cycle (BTHENUM disconnect → reconnect) re-triggers
+      F1 → F3 SDP query path on every reconnect. Each reconnect = fresh
+      opportunity for F2 BRB queue to enter the broken state. The user does
+      mouse pair-on-boot routinely. Plan does not test this cycle.
+    severity: MEDIUM
+
+empirical_evidence_to_gather_BEFORE_install:
+  - id: E1
+    type: static_analysis (safe — no system mutation)
+    action: |
+      Trace every callsite in F2 (IOCTL 0x410003 handler, file range
+      0x081e0..0x08636 per Session 16 boundaries) that writes to either
+      [X+0x84] or [X+0x88] where X is the BRB context. Specifically:
+        cd /home/lesley/projects/Personal/magic-mouse-tray/.ai/rev-eng/08f33d7e3ece
+        grep -n -E 'mov.*(byte|dword|qword) ptr \[r[a-z][a-z]\+0x8[48]\]' disasm.txt
+        # Or capstone-script to walk F2's basic blocks and identify all writes
+        # to offsets +0x84 and +0x88 from any register.
+      Goal: identify whether ANY path creates the NULL+len=4 state. If found,
+      we have the smoking gun. If not found anywhere in F2, the state must
+      come from outside (BT stack callback, etc), which strengthens the race
+      hypothesis but doesn't identify the trigger.
+  - id: E2
+    type: static_analysis (safe)
+    action: |
+      Identify what makes the descriptor patch SPECIFICALLY trigger F2
+      differently from stock. Check whether F2's logic (or callers of F2)
+      has any branch keyed on:
+        - Vendor UsagePage 0xFF00 detection
+        - RID 0x90 specifically
+        - Multi-TLC device detection (e.g., HID parser response)
+      If F2's queries become "heavier" or "more frequent" on multi-TLC
+      devices, the F2 race window is exposed only on patched-descriptor
+      systems, explaining the empirical correlation.
+  - id: E3
+    type: empirical (probe machine, NOT user's daily driver)
+    action: |
+      Gate-zero CI-probe test (per OQ3). Single-byte benign patch + cat-only
+      sign + INF install. Outcome: CI loads / CI rejects.
+  - id: E4
+    type: empirical (probe machine, NOT user's daily driver)
+    action: |
+      Driver-rank test (per OQ1). Install our INF (with the structural
+      changes from OQ2 applied — renamed service + binary) on a probe machine
+      with v3 mouse paired. Verify:
+        Get-PnpDeviceProperty -InstanceId <v3-bthenum> -KeyName DEVPKEY_Device_DriverInfPath
+      shows our oem<NN>.inf, not Apple's oem10.inf.
+  - id: E5
+    type: read-only system query (safe on user's machine)
+    action: |
+      Confirm what's currently paired:
+        Get-PnpDevice -InstanceId 'BTHENUM*' | Where { $_.InstanceId -match 'PID&' }
+      Confirm that v1 (030D) IS paired alongside v3 (0323). The v5 plan
+      assumes both. If only v3 is paired, OQ2 isolation problem disappears
+      (no v1 to cross-bind).
+  - id: E6
+    type: read-only documentation
+    action: |
+      Read the reference project's README and any install scripts. Verify
+      they really do use service name "applewirelessmouse" with stock binary.
+      Confirm no service-rename strategy in reference. This locks in the
+      OQ2 finding (we cannot copy their service-sharing model).
+  - id: E7
+    type: empirical (probe machine, optional)
+    action: |
+      72h soak with renamed-service patched bundle on v3 mouse. Only viable
+      if probe machine available. If probe machine = user's daily driver,
+      not viable.
+
+required_changes_to_plan:
+  structural:
+    - id: S1
+      severity: must_change_before_install
+      change: |
+        Rename service and binary in our INF. Concrete steps:
+        - In AppleWirelessMouse.inf:
+            ServiceBinary = %12%\MagicMouseFixV3.sys
+            AddService = MagicMouseFixV3,, MagicMouseFixV3_Service_Inst
+            HKR,,"LowerFilters",0x00010000,"MagicMouseFixV3"
+            CopyFiles target: MagicMouseFixV3.sys
+        - Rename source file: applewirelessmouse.sys → MagicMouseFixV3.sys
+          (NOTE: this is the patched 78,424-byte WHQL-overlay-intact binary
+          at /mnt/c/mm-dev-queue/AppleWirelessMouse.sys, MD5 0d9a89d0...)
+        - Regenerate cat to hash MagicMouseFixV3.sys (renamed file)
+        - Sign cat with MagicMouseFix M14 cert (16940C0F...)
+      rationale: |
+        Without service rename, v1 cross-loads our patched binary via Apple's
+        stock oem10.inf service registration → BSOD #2 trigger NOT removed.
+    - id: S2
+      severity: must_change_before_install
+      change: |
+        Update startup-repair.ps1 to skip non-v3 PIDs:
+        ```
+        foreach ($mmPid in $knownPids) {
+            if ($mmPid -ne "0323") { continue }
+            ...
+        }
+        ```
+        Or remove other PIDs from $knownPids entirely.
+      rationale: BSOD #2 fired 14 min after this script ran on v1.
+    - id: S3
+      severity: must_add_to_install_procedure
+      change: |
+        Add explicit BTHPORT cache invalidation step before pnputil /restart-device.
+      rationale: HidBth caches descriptor in kernel pool; cached state can outlive driver swap.
+    - id: S4
+      severity: must_add_to_install_procedure
+      change: |
+        Add `powercfg /h off` to install pre-flight; do NOT proceed with
+        Fast Startup enabled.
+      rationale: H-025 in PSN-0001 confirmed Fast Startup defeats PFRO and
+        confounds reboot-driven state cycles. INF install path doesn't directly
+        depend on PFRO, but post-install verification reboots do.
+    - id: S5
+      severity: should_add_to_install_procedure
+      change: |
+        Post-install verification step:
+        - Get-PnpDeviceProperty -InstanceId <v3-bthenum> -KeyName DEVPKEY_Device_DriverInfPath
+          → must show OUR oem<NN>.inf
+        - sc query MagicMouseFixV3 → state RUNNING (or DEMAND_START + on-stack)
+        - Get-PnpDevice -Class HIDClass -InstanceId *0323* → both COL01 and COL02 OK
+        - HidD_GetInputReport(0x90) → buf[2] in 0..100 range
+      rationale: Confirms binding actually happened, not just install.
+
+  empirical:
+    - id: E_S1
+      severity: must_complete_before_install
+      action: "E1 + E2 — static analysis pass on F2 to identify or rule out NULL+len=4 producer."
+    - id: E_S2
+      severity: must_complete_before_install
+      action: "E3 — gate-zero CI-probe test on probe machine."
+    - id: E_S3
+      severity: should_complete_before_install
+      action: "E4 — driver-rank empirical test on probe machine."
+    - id: E_S4
+      severity: must_complete_before_install
+      action: "E5 — confirm what's actually paired on user's machine (read-only)."
+
+  optional_strategic:
+    - id: ST1
+      consideration: |
+        Session 19 already demonstrated PATH-A delivers battery on v3 (40%
+        empirical). PATH-B (PRD-26 userland recycler) is in_progress on
+        branch ai/prd-26-path-b-userland-recycler and reportedly produces
+        Mode A (battery readable) without a custom kernel filter. If
+        PATH-B works for the user's daily-driver use case, the marginal
+        value of PATH-A is whether it produces a more-stable Mode A or a
+        better single-shot read pattern. The BSOD risk for the user's
+        only test machine may not be worth that incremental gain.
+        This is a strategic judgment for the user, not a technical verdict.
+      action_for_user: |
+        Decide: is PATH-A required for ship, or is PATH-B sufficient? If
+        PATH-B sufficient, PATH-A becomes Phase 2 R&D (no daily-driver
+        install pressure).
+
+predicted_failure_modes_if_user_proceeds_unchanged:
+  outcome_distribution_estimate:
+    benign_no_op: 60%
+      - "WHQL ranking wins. Our INF installed but not bound to v3. No behavior change. Tray sees no difference, no BSOD."
+    bsod_same_as_before: 25%
+      - "Our INF binds. v1 cross-loads our patched binary via shared service name. v1 enumeration triggers F2 NULL-deref the same way as 2026-05-08."
+    ci_hard_block: 10%
+      - "STATUS_INVALID_IMAGE_HASH on the WHQL-corrupted PE. Install fails with no behavior change."
+    plan_works: 5%
+      - "Our INF binds, WHQL fallback to cat works, v1 doesn't cross-fire (e.g., not paired), BSOD doesn't reproduce."
+  recommendation_given_distribution: |
+    Most likely outcome ("benign no-op") wastes the install attempt's effort.
+    Most likely "bad" outcome (25%) reproduces the BSOD that took ~30 min to
+    recover from twice. The 5% "plan works" outcome doesn't justify the
+    expected-value ratio.
+
+verdict: REJECT (CHANGES-NEEDED, structural)
+strength: HIGH — based on direct comparison of two INF files and disasm trace
+do_not_install: true
+required_changes_summary: |
+  1. Rename service + binary in our INF (S1) — fundamental isolation primitive
+  2. Fix startup-repair.ps1 PID iteration (S2)
+  3. Add BTHPORT cache invalidation step (S3)
+  4. Disable Fast Startup before any install (S4)
+  5. Post-install verification block (S5)
+  6. Static analysis pass on F2 (E_S1) — identify NULL+len=4 producer
+  7. Gate-zero CI-probe on probe machine (E_S2)
+  8. Driver-rank empirical confirmation (E_S3)
+  9. Confirm v1 currently paired (E_S4)
+
+  After all the above complete with green outcomes, re-review the design
+  before any install attempt on the user's daily driver.
+
+notes_to_user: |
+  This review reaches its conclusions from primary evidence (disasm + INFs +
+  empirical timeline) WITHOUT anchoring on H-027c, H-028, H-029, or any
+  prior peer-review verdict. I am not claiming the "true root cause" of the
+  BSODs — I am claiming the v5 install plan as written cannot achieve the
+  isolation it claims, and the BSOD mechanism is not yet localized enough
+  to certify v5 as safe.
+
+  The most surprising finding for me was OQ2 (service-name reuse defeats
+  v3-only isolation). This is mechanical, not subtle, and would be obvious
+  to any reviewer reading the two INFs side by side. I recommend you read
+  the two INFs side by side yourself to confirm — they are short and the
+  comparison takes about five minutes.
+
+  If the user wishes to proceed despite this verdict: at minimum complete
+  S1 (rename service) + E_S4 (confirm v1 paired). Without S1, BSOD #2
+  reproduction risk is in the 25% range per my estimate.

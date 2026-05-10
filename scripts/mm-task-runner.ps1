@@ -345,6 +345,75 @@ try {
         }
         Log "RESTART-DEVICE exited $rc; log at $rdLog"
     }
+    # DISABLE-ENABLE-DEVICE: pnputil /disable-device + sleep + /enable-device.
+    # Forces full PnP re-enumeration; clears CM_PROB_FAILED_START state that
+    # /restart-device alone won't lift.
+    # Format: DISABLE-ENABLE-DEVICE|<nonce>|<instanceId>
+    elseif ($phase -eq 'DISABLE-ENABLE-DEVICE') {
+        $iid = if ($parts.Count -gt 2) { $parts[2..($parts.Count-1)] -join '|' } else { '' }
+        $deLog = Join-Path $QueueDir "disable-enable-$nonce.log"
+        if (-not $iid) {
+            "ERROR: instance ID required" | Set-Content $deLog -Encoding ASCII
+            $rc = 2
+        } else {
+            try {
+                "=== pnputil /disable-device $iid ===" | Set-Content $deLog -Encoding ASCII
+                & pnputil /disable-device $iid 2>&1 | Add-Content $deLog -Encoding ASCII
+                Start-Sleep -Seconds 3
+                "=== pnputil /enable-device $iid ===" | Add-Content $deLog -Encoding ASCII
+                & pnputil /enable-device $iid 2>&1 | Add-Content $deLog -Encoding ASCII
+                Start-Sleep -Seconds 12
+                $dev = Get-PnpDevice -InstanceId $iid -EA SilentlyContinue
+                "POST Status: $($dev.Status) Problem: $($dev.Problem)" | Add-Content $deLog -Encoding ASCII
+                $rc = if ($dev.Status -eq 'OK') { 0 } else { 1 }
+            } catch {
+                "Exception: $_" | Add-Content $deLog -Encoding ASCII
+                $rc = 99
+            }
+        }
+        Log "DISABLE-ENABLE-DEVICE exited $rc; log at $deLog"
+    }
+    # SET-LOWERFILTERS: write LowerFilters value on a device's Enum key + restart-device.
+    # Format: SET-LOWERFILTERS|<nonce>|<instanceId>|<filter1,filter2,...>
+    # Pass empty filter list to clear (e.g., "SET-LOWERFILTERS|n|<id>|"). Backs up
+    # the device's full Enum key to a .reg file before write.
+    elseif ($phase -eq 'SET-LOWERFILTERS') {
+        $iid     = if ($parts.Count -gt 2) { $parts[2].Trim() } else { '' }
+        $filters = if ($parts.Count -gt 3) { $parts[3].Trim() } else { '' }
+        $sfLog = Join-Path $QueueDir "setlf-$nonce.log"
+        if (-not $iid) {
+            "ERROR: instance ID required" | Set-Content $sfLog -Encoding ASCII
+            $rc = 2
+        } else {
+            try {
+                $regKey = "HKLM\SYSTEM\CurrentControlSet\Enum\$iid"
+                $psPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$iid"
+                $backupReg = Join-Path $QueueDir "setlf-backup-$nonce.reg"
+                "=== SET-LOWERFILTERS iid=$iid filters=$filters ===" | Set-Content $sfLog -Encoding ASCII
+                & reg.exe export $regKey $backupReg /y 2>&1 | Add-Content $sfLog -Encoding ASCII
+                $pre = (Get-ItemProperty -Path $psPath -Name LowerFilters -EA SilentlyContinue).LowerFilters
+                "PRE LowerFilters: $($pre -join ', ')" | Add-Content $sfLog -Encoding ASCII
+                $newVal = if ($filters) { @($filters -split ',' | ForEach-Object { $_.Trim() }) } else { @() }
+                if ($newVal.Count -eq 0) {
+                    Remove-ItemProperty -Path $psPath -Name LowerFilters -EA SilentlyContinue
+                } else {
+                    Set-ItemProperty -Path $psPath -Name LowerFilters -Value $newVal -Type MultiString
+                }
+                "Set LowerFilters = $($newVal -join ', ')" | Add-Content $sfLog -Encoding ASCII
+                "=== pnputil /restart-device ===" | Add-Content $sfLog -Encoding ASCII
+                & pnputil /restart-device $iid 2>&1 | Add-Content $sfLog -Encoding ASCII
+                Start-Sleep -Seconds 10
+                $post = (Get-ItemProperty -Path $psPath -Name LowerFilters -EA SilentlyContinue).LowerFilters
+                "POST LowerFilters: $($post -join ', ')" | Add-Content $sfLog -Encoding ASCII
+                "Backup: $backupReg" | Add-Content $sfLog -Encoding ASCII
+                $rc = 0
+            } catch {
+                "Exception: $_" | Add-Content $sfLog -Encoding ASCII
+                $rc = 99
+            }
+        }
+        Log "SET-LOWERFILTERS exited $rc; log at $sfLog"
+    }
     # SIGN-FILE: signtool sign /sm /sha1 ... /fd sha256 /tr ... /td sha256 <file>
     # Format: SIGN-FILE|<nonce>|<file-path>|<thumbprint>
     elseif ($phase -eq 'SIGN-FILE') {
@@ -652,6 +721,140 @@ try {
             Log "Exception running mm-state-flip.ps1: $_"
             $rc = 99
         }
+    }
+    # PATHA-V5-INSTALL: full v5 install in one queue submission.
+    # Format: PATHA-V5-INSTALL|<nonce>|<bundle-dir>
+    # bundle-dir must contain MagicMouseFixV3.{inf,sys} + sign-and-install.ps1.
+    # This route auto-mounts EWDK ISO if needed, runs InfVerif, regen+sign cat,
+    # clears BTHPORT cache, pnputil add-driver, restart-device, verify LowerFilters.
+    elseif ($phase -eq 'PATHA-V5-INSTALL') {
+        $bundle = if ($parts.Count -gt 2) { $parts[2].Trim() } else { 'C:\mm-dev-queue\PATH-A-v5' }
+        $v5Log  = Join-Path $QueueDir "pathA-v5-install-$nonce.log"
+        try {
+            "=== PATHA-V5-INSTALL bundle=$bundle ===" | Set-Content $v5Log -Encoding ASCII
+
+            # Step 1: ensure EWDK ISO is mounted (reuse BUILD route's pattern)
+            $isoPath = 'D:\Users\Lesley\Downloads\EWDK_ge_release_svc_prod1_26100_250904-1728.iso'
+            $ewdkRoot = $null
+            foreach ($drv in [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady }) {
+                $c = Join-Path $drv.RootDirectory.FullName 'BuildEnv\SetupBuildEnv.cmd'
+                if (Test-Path $c) { $ewdkRoot = $drv.RootDirectory.FullName; break }
+            }
+            if (-not $ewdkRoot) {
+                "EWDK not mounted - mounting $isoPath" | Add-Content $v5Log -Encoding ASCII
+                Mount-DiskImage -ImagePath $isoPath -PassThru -ErrorAction Stop | Out-Null
+                Start-Sleep -Milliseconds 1500
+                foreach ($drv in [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady }) {
+                    $c = Join-Path $drv.RootDirectory.FullName 'BuildEnv\SetupBuildEnv.cmd'
+                    if (Test-Path $c) { $ewdkRoot = $drv.RootDirectory.FullName; break }
+                }
+            }
+            if (-not $ewdkRoot) { throw "EWDK not available even after mount attempt" }
+            $infVerif = Join-Path $ewdkRoot 'Program Files\Windows Kits\10\Tools\10.0.26100.0\x64\InfVerif.exe'
+            "EWDK at $ewdkRoot" | Add-Content $v5Log -Encoding ASCII
+
+            # Step 2: bundle integrity
+            $infPath = Join-Path $bundle 'MagicMouseFixV3.inf'
+            $sysPath = Join-Path $bundle 'MagicMouseFixV3.sys'
+            $signSrc = Join-Path $bundle 'sign-and-install.ps1'
+            foreach ($p in @($infPath, $sysPath, $signSrc)) {
+                if (-not (Test-Path $p)) { throw "Missing bundle file: $p" }
+            }
+
+            # Step 3: InfVerif gate
+            "Running InfVerif on $infPath" | Add-Content $v5Log -Encoding ASCII
+            & $infVerif /v /w "$infPath" 2>&1 | Add-Content $v5Log -Encoding ASCII
+            if ($LASTEXITCODE -ne 0) { throw "InfVerif FAILED ($LASTEXITCODE)" }
+
+            # Step 4: clear BTHPORT cache for v3 MAC (find it dynamically)
+            $v3 = Get-PnpDevice -EA SilentlyContinue | Where-Object { $_.InstanceId -match 'BTHENUM.*00001124.*PID&0323' } | Select-Object -First 1
+            if ($v3 -and $v3.InstanceId -match '&0&([0-9A-Fa-f]{12})_C\d+$') {
+                $mac = $matches[1].ToUpper()
+                $base = "HKLM:\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices\$mac"
+                foreach ($sub in 'CachedServices','DynamicCachedServices','Cache') {
+                    if (Test-Path "$base\$sub") {
+                        Remove-Item -Path "$base\$sub" -Recurse -Force -EA SilentlyContinue
+                        "cleared $base\$sub" | Add-Content $v5Log -Encoding ASCII
+                    }
+                }
+            }
+
+            # Step 5: delegate sign+install to parameterized sign-and-install.ps1
+            "Invoking $signSrc with v5 args" | Add-Content $v5Log -Encoding ASCII
+            $signArgs = @(
+                '-NoProfile','-ExecutionPolicy','Bypass','-File',$signSrc,
+                '-DriverDir',$bundle,
+                '-InfName','MagicMouseFixV3.inf',
+                '-CatName','MagicMouseFixV3.cat',
+                '-ServiceName','MagicMouseFixV3',
+                '-ExistingCertThumbprint','16940C0F937D569363560D5FEC5CD8FA6D6D9BCE'
+            )
+            & powershell.exe @signArgs 2>&1 | Add-Content $v5Log -Encoding ASCII
+            if ($LASTEXITCODE -ne 0) { throw "sign-and-install.ps1 FAILED ($LASTEXITCODE)" }
+
+            # Step 6: restart-device on v3
+            if ($v3) {
+                "pnputil /restart-device $($v3.InstanceId)" | Add-Content $v5Log -Encoding ASCII
+                & pnputil /restart-device "$($v3.InstanceId)" 2>&1 | Add-Content $v5Log -Encoding ASCII
+                Start-Sleep -Seconds 10
+            }
+
+            # Step 7: verify LowerFilters now contains MagicMouseFixV3
+            if ($v3) {
+                $lf = (Get-PnpDeviceProperty -InstanceId $v3.InstanceId -KeyName 'DEVPKEY_Device_LowerFilters' -EA SilentlyContinue).Data
+                $lfStr = if ($lf) { $lf -join ', ' } else { '(none)' }
+                "v3 LowerFilters post-install: $lfStr" | Add-Content $v5Log -Encoding ASCII
+                if ($lf -contains 'MagicMouseFixV3') {
+                    "PASS: MagicMouseFixV3 in v3 LowerFilters" | Add-Content $v5Log -Encoding ASCII
+                    $rc = 0
+                } else {
+                    "FAIL: MagicMouseFixV3 NOT in v3 LowerFilters" | Add-Content $v5Log -Encoding ASCII
+                    $rc = 5
+                }
+            } else {
+                "WARN: v3 not paired - skipped post-verify" | Add-Content $v5Log -Encoding ASCII
+                $rc = 0
+            }
+        } catch {
+            "Exception: $_" | Add-Content $v5Log -Encoding ASCII
+            Log "Exception in PATHA-V5-INSTALL: $_"
+            $rc = 99
+        }
+        Log "PATHA-V5-INSTALL exited $rc; log at $v5Log"
+    }
+    # PATHA-V5-UNINSTALL: rollback v5 install. Removes oem*.inf for MagicMouseFixV3.inf,
+    # stops/deletes service, restarts v3 device, verifies stock applewirelessmouse restored.
+    elseif ($phase -eq 'PATHA-V5-UNINSTALL') {
+        $unLog = Join-Path $QueueDir "pathA-v5-uninstall-$nonce.log"
+        try {
+            "=== PATHA-V5-UNINSTALL ===" | Set-Content $unLog -Encoding ASCII
+            $enum = & pnputil /enum-drivers 2>&1 | Out-String
+            $oems = ($enum -split '(?=Published Name:)') |
+                Where-Object { $_ -match 'MagicMouseFixV3\.inf' } |
+                ForEach-Object { if ($_ -match 'Published Name:\s+(oem\d+\.inf)') { $Matches[1] } }
+            "Our oem entries: $($oems -join ', ')" | Add-Content $unLog -Encoding ASCII
+            foreach ($oem in $oems) {
+                "pnputil /delete-driver $oem /uninstall /force" | Add-Content $unLog -Encoding ASCII
+                & pnputil /delete-driver $oem /uninstall /force 2>&1 | Add-Content $unLog -Encoding ASCII
+            }
+            $svc = Get-Service MagicMouseFixV3 -EA SilentlyContinue
+            if ($svc) {
+                if ($svc.Status -eq 'Running') { Stop-Service MagicMouseFixV3 -Force -EA SilentlyContinue }
+                & sc.exe delete MagicMouseFixV3 2>&1 | Add-Content $unLog -Encoding ASCII
+            }
+            $ourSys = 'C:\Windows\System32\drivers\MagicMouseFixV3.sys'
+            if (Test-Path $ourSys) { Remove-Item $ourSys -Force -EA SilentlyContinue }
+            $v3 = Get-PnpDevice -EA SilentlyContinue | Where-Object { $_.InstanceId -match 'BTHENUM.*00001124.*PID&0323' } | Select-Object -First 1
+            if ($v3) {
+                & pnputil /restart-device "$($v3.InstanceId)" 2>&1 | Add-Content $unLog -Encoding ASCII
+                Start-Sleep -Seconds 8
+            }
+            $rc = 0
+        } catch {
+            "Exception: $_" | Add-Content $unLog -Encoding ASCII
+            $rc = 99
+        }
+        Log "PATHA-V5-UNINSTALL exited $rc; log at $unLog"
     } else {
         # Default: route to mm-dev.ps1 -Phase $phase
         $candidates = @(
