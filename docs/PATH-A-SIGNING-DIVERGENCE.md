@@ -18,6 +18,17 @@ reference-project pattern. **Must be redone correctly before any release.**
 
 ---
 
+## Reference projects (canonical pattern)
+
+Two public repos ship the same install structure; PATH-A v5 mirrors it.
+
+| Repo | Notes |
+|---|---|
+| [`sbagirici/apple-magic-mouse-scroll-fix-windows`](https://github.com/sbagirici/apple-magic-mouse-scroll-fix-windows) | Scroll-only. Ships Apple's WHQL-signed `applewirelessmouse.sys` unmodified; install via PowerShell writing `LowerFilters` directly to the device Enum key (bypasses Apple's INF because it doesn't list MM2 PID `0x0323`). No patch, no test-signing. |
+| [`tealtadpole/MagicMouse2DriversWin11x64`](https://github.com/tealtadpole/MagicMouse2DriversWin11x64) (local copy: `D:\Users\Lesley\Downloads\MagicMouse2DriversWin11x64-master`) | Same family. Ships INF + `.cat` + `.sys` bundle; install via `pnputil /add-driver`. |
+
+The shared pattern: `.sys` byte-identical to Apple's stock except (in our case) the `.data` patch at `0xA850`; regenerated `.cat` signed with our cert; INF declares `LowerFilters`; install via `pnputil`. Neither reference project re-signs the `.sys` directly.
+
 ## Reference Pattern (Canonical) — `D:\Users\Lesley\Downloads\MagicMouse2DriversWin11x64-master`
 
 | File | Signing |
