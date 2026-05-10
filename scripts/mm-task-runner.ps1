@@ -345,6 +345,75 @@ try {
         }
         Log "RESTART-DEVICE exited $rc; log at $rdLog"
     }
+    # DISABLE-ENABLE-DEVICE: pnputil /disable-device + sleep + /enable-device.
+    # Forces full PnP re-enumeration; clears CM_PROB_FAILED_START state that
+    # /restart-device alone won't lift.
+    # Format: DISABLE-ENABLE-DEVICE|<nonce>|<instanceId>
+    elseif ($phase -eq 'DISABLE-ENABLE-DEVICE') {
+        $iid = if ($parts.Count -gt 2) { $parts[2..($parts.Count-1)] -join '|' } else { '' }
+        $deLog = Join-Path $QueueDir "disable-enable-$nonce.log"
+        if (-not $iid) {
+            "ERROR: instance ID required" | Set-Content $deLog -Encoding ASCII
+            $rc = 2
+        } else {
+            try {
+                "=== pnputil /disable-device $iid ===" | Set-Content $deLog -Encoding ASCII
+                & pnputil /disable-device $iid 2>&1 | Add-Content $deLog -Encoding ASCII
+                Start-Sleep -Seconds 3
+                "=== pnputil /enable-device $iid ===" | Add-Content $deLog -Encoding ASCII
+                & pnputil /enable-device $iid 2>&1 | Add-Content $deLog -Encoding ASCII
+                Start-Sleep -Seconds 12
+                $dev = Get-PnpDevice -InstanceId $iid -EA SilentlyContinue
+                "POST Status: $($dev.Status) Problem: $($dev.Problem)" | Add-Content $deLog -Encoding ASCII
+                $rc = if ($dev.Status -eq 'OK') { 0 } else { 1 }
+            } catch {
+                "Exception: $_" | Add-Content $deLog -Encoding ASCII
+                $rc = 99
+            }
+        }
+        Log "DISABLE-ENABLE-DEVICE exited $rc; log at $deLog"
+    }
+    # SET-LOWERFILTERS: write LowerFilters value on a device's Enum key + restart-device.
+    # Format: SET-LOWERFILTERS|<nonce>|<instanceId>|<filter1,filter2,...>
+    # Pass empty filter list to clear (e.g., "SET-LOWERFILTERS|n|<id>|"). Backs up
+    # the device's full Enum key to a .reg file before write.
+    elseif ($phase -eq 'SET-LOWERFILTERS') {
+        $iid     = if ($parts.Count -gt 2) { $parts[2].Trim() } else { '' }
+        $filters = if ($parts.Count -gt 3) { $parts[3].Trim() } else { '' }
+        $sfLog = Join-Path $QueueDir "setlf-$nonce.log"
+        if (-not $iid) {
+            "ERROR: instance ID required" | Set-Content $sfLog -Encoding ASCII
+            $rc = 2
+        } else {
+            try {
+                $regKey = "HKLM\SYSTEM\CurrentControlSet\Enum\$iid"
+                $psPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$iid"
+                $backupReg = Join-Path $QueueDir "setlf-backup-$nonce.reg"
+                "=== SET-LOWERFILTERS iid=$iid filters=$filters ===" | Set-Content $sfLog -Encoding ASCII
+                & reg.exe export $regKey $backupReg /y 2>&1 | Add-Content $sfLog -Encoding ASCII
+                $pre = (Get-ItemProperty -Path $psPath -Name LowerFilters -EA SilentlyContinue).LowerFilters
+                "PRE LowerFilters: $($pre -join ', ')" | Add-Content $sfLog -Encoding ASCII
+                $newVal = if ($filters) { @($filters -split ',' | ForEach-Object { $_.Trim() }) } else { @() }
+                if ($newVal.Count -eq 0) {
+                    Remove-ItemProperty -Path $psPath -Name LowerFilters -EA SilentlyContinue
+                } else {
+                    Set-ItemProperty -Path $psPath -Name LowerFilters -Value $newVal -Type MultiString
+                }
+                "Set LowerFilters = $($newVal -join ', ')" | Add-Content $sfLog -Encoding ASCII
+                "=== pnputil /restart-device ===" | Add-Content $sfLog -Encoding ASCII
+                & pnputil /restart-device $iid 2>&1 | Add-Content $sfLog -Encoding ASCII
+                Start-Sleep -Seconds 10
+                $post = (Get-ItemProperty -Path $psPath -Name LowerFilters -EA SilentlyContinue).LowerFilters
+                "POST LowerFilters: $($post -join ', ')" | Add-Content $sfLog -Encoding ASCII
+                "Backup: $backupReg" | Add-Content $sfLog -Encoding ASCII
+                $rc = 0
+            } catch {
+                "Exception: $_" | Add-Content $sfLog -Encoding ASCII
+                $rc = 99
+            }
+        }
+        Log "SET-LOWERFILTERS exited $rc; log at $sfLog"
+    }
     # SIGN-FILE: signtool sign /sm /sha1 ... /fd sha256 /tr ... /td sha256 <file>
     # Format: SIGN-FILE|<nonce>|<file-path>|<thumbprint>
     elseif ($phase -eq 'SIGN-FILE') {

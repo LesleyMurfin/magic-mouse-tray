@@ -1,9 +1,9 @@
 ---
-title: PATH-A v5 — INF-Based Install Refactor (SRE-Windows-corrected)
+title: PATH-A v5 — INF-Based Install Refactor (SUPERSEDED — INF path empirically dead, pivoted to direct-copy)
 type: design
 date: 2026-05-09
-version: 1.1.0
-status: structural fixes applied per SRE-Windows independent review — pending Windows-side empirical pre-tests + user approval gate
+version: 1.2.0
+status: SUPERSEDED — pnputil INF install path failed CI HashMismatch on Win11 26200 (2026-05-09 21:15:48). Forward path is Session 19's signtool re-sign + PATCH-APPLE-SYS direct-copy. See docs/PATH-A-V5-CI-HASHMISMATCH-FINDING.md.
 linked_prd: PRD-184 v1.31.0
 linked_psn: PSN-0001 v2.4.0
 linked_review: .ai/peer-reviews/2026-05-09-pathA-v5-sre-windows-review.yaml
