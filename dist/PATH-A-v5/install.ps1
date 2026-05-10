@@ -129,14 +129,21 @@ if ($hibState -eq 1) {
     Write-Log "  Fast Startup OK (HiberbootEnabled=$hibState)"
 }
 
-# 5. Testsigning check
+# 5. Testsigning check.
+# bcdedit requires admin to read the BCD store. Without admin we get
+# 'Access is denied' or 'specified entry type is invalid' (PowerShell brace
+# escaping). Don't treat that as "off" - treat as "unknown" and require
+# admin to verify in -Apply mode (we already require admin to install).
 $bcdedit = & bcdedit.exe /enum '{current}' 2>&1
-$testsigning = $bcdedit | Where-Object { $_ -match 'testsigning\s+Yes' }
-if (-not $testsigning) {
-    Write-Log "testsigning is OFF. Required for self-signed catalog. Run 'bcdedit /set testsigning on' and reboot." "ERROR"
-    if ($Apply) { exit 1 }
+$bcdRaw = ($bcdedit | Out-String)
+if ($bcdRaw -match 'Access is denied|configuration data store could not be opened|specified entry type is invalid') {
+    Write-Log "  testsigning: unable to verify (bcdedit needs admin). Re-run with admin to confirm." "WARN"
+    if ($Apply -and -not (Test-Admin)) { Write-Log "Re-run as admin." "ERROR"; exit 1 }
+} elseif ($bcdRaw -match 'testsigning\s+Yes') {
+    Write-Log "  testsigning OK (Yes)"
 } else {
-    Write-Log "  testsigning OK"
+    Write-Log "testsigning is OFF. Required for self-signed catalog. Run (admin): bcdedit /set testsigning on  then reboot." "ERROR"
+    if ($Apply) { exit 1 }
 }
 
 # 6. MagicMouseFix cert in TrustedPublisher
@@ -238,16 +245,35 @@ foreach ($bt in ($bts | Where-Object { $_.InstanceId -match 'PID&0323' })) {
     }
 }
 
-# 12. pnputil /add-driver /install /force
-Write-Log "  pnputil /add-driver $infPath /install /force"
-$pnpOut = & pnputil.exe /add-driver $infPath /install /force 2>&1
-$pnpOut | ForEach-Object { Write-Log "    pnputil: $_" }
-if ($LASTEXITCODE -ne 0) {
-    Write-Log "pnputil /add-driver FAILED with exit code $LASTEXITCODE" "ERROR"
+# 12. Delegate sign+pnputil install to the parameterized sign-and-install.ps1
+# (single source of truth — same script handles v3 default and v5 via -DriverDir/-InfName/-CatName/-ExistingCertThumbprint).
+$signScript = Join-Path (Resolve-Path (Join-Path $BundleDir '..\..')).Path 'sign-and-install.ps1'
+if (-not (Test-Path $signScript)) {
+    # Fall back: when run from C:\mm-dev-queue\PATH-A-v5\, the repo's sign-and-install.ps1 isn't local.
+    # Look at the bundle dir itself (sign-and-install.ps1 should be staged alongside).
+    $signScript = Join-Path $BundleDir 'sign-and-install.ps1'
+}
+if (-not (Test-Path $signScript)) {
+    Write-Log "sign-and-install.ps1 not found near $BundleDir. Stage it alongside the bundle, or run from the repo." "ERROR"
     exit 1
 }
+Write-Log "Delegating sign+install to: $signScript"
+$signArgs = @(
+    '-NoProfile','-ExecutionPolicy','Bypass','-File',$signScript,
+    '-DriverDir',$BundleDir,
+    '-InfName','MagicMouseFixV3.inf',
+    '-CatName','MagicMouseFixV3.cat',
+    '-ServiceName','MagicMouseFixV3',
+    '-ExistingCertThumbprint','16940C0F937D569363560D5FEC5CD8FA6D6D9BCE'
+)
+& powershell.exe @signArgs 2>&1 | ForEach-Object { Write-Log "    sign-and-install: $_" }
+$signExit = $LASTEXITCODE
+if ($signExit -ne 0) {
+    Write-Log "sign-and-install.ps1 FAILED (exit $signExit)" "ERROR"
+    exit $signExit
+}
 
-# 13. /restart-device on v3
+# 13. /restart-device on v3 (sign-and-install.ps1 already did pnputil /add-driver /install)
 foreach ($bt in ($bts | Where-Object { $_.InstanceId -match 'PID&0323' })) {
     Write-Log "  pnputil /restart-device $($bt.InstanceId)"
     $rdOut = & pnputil.exe /restart-device "$($bt.InstanceId)" 2>&1

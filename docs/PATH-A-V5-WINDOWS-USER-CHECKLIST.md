@@ -48,47 +48,29 @@ If a new minidump appears in `C:\Windows\Minidump\` during the soak: orchestrato
 
 These are safe — they produce files in `/mnt/c/mm-dev-queue/` (or equivalent staging dir), they do not modify System32, DriverStore, or any kernel state.
 
-### A1. Stage the renamed bundle
+### A1. Stage the renamed bundle to C:\
 
 ```powershell
-# From WSL or PowerShell, copy the v5 bundle from repo to staging:
-Copy-Item -Path "<repo>\dist\PATH-A-v5\*" -Destination "C:\mm-dev-queue\PATH-A-v5\" -Force
+# Copy the v5 bundle from repo to staging:
+$repo = '\\wsl.localhost\Ubuntu\home\lesley\projects\Personal\magic-mouse-tray'
+Copy-Item -Path "$repo\dist\PATH-A-v5\*" -Destination 'C:\mm-dev-queue\PATH-A-v5\' -Force
+
+# Stage the parameterized signer alongside (single source of truth):
+Copy-Item -Path "$repo\sign-and-install.ps1" -Destination 'C:\mm-dev-queue\PATH-A-v5\' -Force
+
+# Stage startup-repair.ps1 (sign-and-install.ps1 registers a scheduled task pointing at it):
+Copy-Item -Path "$repo\startup-repair.ps1" -Destination 'C:\mm-dev-queue\PATH-A-v5\' -Force
 
 # Rename the patched .sys to match the new service name:
-# Source: applewirelessmouse-pathA-unsigned.sys (78,424 B, MD5 0d9a89d0..., overlay-intact)
+# Source: applewirelessmouse-pathA-unsigned.sys (78,424 B, MD5 0d9a89d0..., WHQL overlay intact)
 # Target: MagicMouseFixV3.sys (same content, renamed file)
-Copy-Item "C:\mm-dev-queue\applewirelessmouse-pathA-unsigned.sys" `
-          "C:\mm-dev-queue\PATH-A-v5\MagicMouseFixV3.sys"
+Copy-Item 'C:\mm-dev-queue\applewirelessmouse-pathA-unsigned.sys' `
+          'C:\mm-dev-queue\PATH-A-v5\MagicMouseFixV3.sys'
 ```
 
-Do NOT copy the divergent c881c041 binary (the WHQL-overlay-stripped variant) — that's the BSOD'd version per D-S17-03.
+Do NOT use the divergent c881c041 binary (the WHQL-overlay-stripped variant) — that's the BSOD'd version per D-S17-03.
 
-### A2. Regenerate the catalog file
-
-The cat covers MagicMouseFixV3.sys (renamed) — it is NOT compatible with the old applewirelessmouse.sys cat.
-
-**Run on Windows host** (PowerShell as Administrator, NOT in WSL):
-
-```powershell
-$bundle = "C:\mm-dev-queue\PATH-A-v5"
-
-# Build the catalog file from the bundle directory
-New-FileCatalog -Path $bundle `
-                -CatalogFilePath "$bundle\MagicMouseFixV3.cat" `
-                -CatalogVersion 2
-
-# Sign the cat with MagicMouseFix M14 cert (16940C0F...)
-$cert = Get-ChildItem Cert:\LocalMachine\My |
-        Where-Object { $_.Thumbprint -eq '16940C0F937D569363560D5FEC5CD8FA6D6D9BCE' }
-Set-AuthenticodeSignature -FilePath "$bundle\MagicMouseFixV3.cat" `
-                          -Certificate $cert `
-                          -HashAlgorithm SHA256
-
-# Verify
-Get-AuthenticodeSignature "$bundle\MagicMouseFixV3.cat"
-```
-
-Note: signtool.exe is NOT used here — Set-AuthenticodeSignature is the cross-session-known reliable path (per AP-28 in PSN-0001 Session 14). The `.sys` file itself is NOT re-signed (overlay-intact strategy per the SRE-Windows review and D-S17-04).
+### A2. (No manual cat regen needed.) The parameterized `sign-and-install.ps1` does this in Step 4-5 — same `New-FileCatalog` + `Set-AuthenticodeSignature` pattern. It is invoked automatically by `install.ps1` Step 12. You don't run it separately.
 
 ### A3. Read-only system query — confirm what's currently paired
 
