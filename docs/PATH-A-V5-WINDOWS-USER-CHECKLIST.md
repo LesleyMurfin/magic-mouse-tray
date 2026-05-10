@@ -44,7 +44,25 @@ The orchestrator script `dist/PATH-A-v5/instrumented-test.ps1` chains all of thi
 
 If a new minidump appears in `C:\Windows\Minidump\` during the soak: orchestrator copies it to the run dir, stops tracelog, and prints the post-mortem `kd.exe` recipe.
 
-## Phase A — local file work (run on Windows host, no system mutation)
+## Architecture: queue-based via existing framework
+
+You don't run scripts on Windows. The existing `MM-Dev-Cycle` scheduled task (SYSTEM context) picks up requests from `C:\mm-dev-queue\request.txt` and dispatches to `mm-task-runner.ps1` routes. New routes for v5:
+
+- `PATHA-V5-INSTALL|<nonce>|<bundle-dir>` - auto-mounts EWDK ISO, runs InfVerif, regen+sign cat, clears BTHPORT cache, pnputil install, restart-device, verifies LowerFilters
+- `PATHA-V5-UNINSTALL|<nonce>` - pnputil delete-driver, sc delete service, removes binary, restart-device
+
+WSL-side dispatcher: `dist/PATH-A-v5/queue-install.sh` writes the request, triggers `schtasks /run /tn MM-Dev-Cycle`, polls `result.txt` for matching nonce, prints the route log.
+
+```bash
+# From WSL (no Windows-side commands needed):
+bash dist/PATH-A-v5/queue-install.sh stage      # stages bundle to C:\mm-dev-queue\PATH-A-v5\
+bash dist/PATH-A-v5/queue-install.sh install    # submits PATHA-V5-INSTALL request
+bash dist/PATH-A-v5/queue-install.sh uninstall  # submits PATHA-V5-UNINSTALL request
+```
+
+EWDK ISO mount: the route auto-mounts `D:\Users\Lesley\Downloads\EWDK_..._26100_....iso` if no drive has `BuildEnv\SetupBuildEnv.cmd`. Survives reboots because the route re-mounts each invocation.
+
+## Phase A - local file work (run on Windows host, no system mutation)
 
 These are safe — they produce files in `/mnt/c/mm-dev-queue/` (or equivalent staging dir), they do not modify System32, DriverStore, or any kernel state.
 
