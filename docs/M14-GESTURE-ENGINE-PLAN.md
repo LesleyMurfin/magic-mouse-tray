@@ -1,7 +1,8 @@
 ---
-title: M14 - v3 Gesture Engine Plan (with PacketLogger ground-truth)
+title: M14 - v3 Gesture Engine Plan (Linux MOUSE2_REPORT_ID port)
 type: design
-date: 2026-05-09
+date: 2026-05-10
+version: 1.1.0
 status: planned
 linked_prd: PRD-184
 linked_psn: PSN-0001
@@ -10,88 +11,70 @@ depends_on: M13 (descriptor injection - DONE per Session 13)
 
 # M14 - v3 Gesture Engine
 
-**BLUF**: M13 already does SDP descriptor injection successfully (COL01+COL02+COL03 enumerate, SdpPatchSuccess=1, IoctlInterceptCount=2 per PSN H-017/H-018). M14 adds the gesture translation: intercept RID 0x27 multi-touch reports on read-completion, parse Apple's proprietary 46-byte format, synthesize standard HID Wheel (0x38) + AC-Pan (0x238B) values into the IRP buffer before completing upward.
+**BLUF**: v3 (PID 0x0323, Magic Mouse 2024) over Bluetooth uses **RID 0x12 = MOUSE2_REPORT_ID** — same RID Linux master `drivers/hid/hid-magicmouse.c` already handles. Linux's MOUSE2_REPORT_ID dispatch in `magicmouse_raw_event()` plus `magicmouse_emit_touch()` and `magicmouse_emit_buttons()` are the gesture engine. **~200 LOC port from Linux GPL'd C to our WDF kernel filter.** No protocol research needed — Linux is the spec.
 
-PacketLogger access on the MacBook is the **unlock** that turns this from research project into translation exercise. Estimated **4-7 sessions / 1-2 weeks** for shippable 2-finger scroll.
+Confirmed 2026-05-10 by user observation: "RID 0x12 matches exactly what Linux's hid-magicmouse.c calls MOUSE2_REPORT_ID = 0x12". Linux master USBC variant `USB_DEVICE_ID_APPLE_MAGICMOUSE2_USBC` references confirm v3 uses MOUSE2_REPORT_ID parsing path.
+
+Revised estimate: **~16-20 hrs / 3-4 sessions / ~1 week** for shippable 2-finger scroll. (Prior PSN-0001 H-014 / D-017 stated "RID 0x27" — that note was wrong; v3 sends 0x12 like v2.)
 
 ## References available
 
 | Source | Coverage | Quality |
 |---|---|---|
-| Linux `drivers/hid/hid-magicmouse.c` master | Gesture translation logic for RID 0x29/0x12/0x28 (v1, v2, trackpad). Documented byte layouts, scroll/pan synthesis, finger tracking. | Open-source, battle-tested. RID 0x27 (v3 specific) NOT covered upstream - but the Linux code structure transfers. |
-| Ghidra'd `MagicMouse.sys` (Magic Utilities, captured 2026-04-28) | Closed-source but RE'd. Has the actual v3 RID 0x27 byte layout + translation code Apple/MU figured out. | At `.ai/M12-MagicMouse.gpr` |
-| **MacBook + Apple PacketLogger + paired v3** | Wire-level ground truth - exact bytes macOS sees during real gestures | **Game-changer**. Eliminates the "guess at byte semantics" phase. |
+| **Linux `drivers/hid/hid-magicmouse.c` master** | **MOUSE2_REPORT_ID (RID 0x12) handler covers v3.** Byte layout, finger touch parsing (`magicmouse_emit_touch`), button emission (`magicmouse_emit_buttons`), scroll/pan synthesis with REL_WHEEL/REL_HWHEEL/HI_RES variants. ~200 LOC of GPL'd C. | **Authoritative.** Battle-tested upstream. v3 USBC explicitly referenced (`USB_DEVICE_ID_APPLE_MAGICMOUSE2_USBC`). |
+| Ghidra'd `MagicMouse.sys` (Magic Utilities, captured 2026-04-28) | Cross-verification only - confirm Linux's MOUSE2 byte layout matches what MU does in their kernel filter. | At `.ai/M12-MagicMouse.gpr` |
+| MacBook + PacketLogger | Optional sanity check - capture one 2-finger scroll, confirm RID 0x12 size = 14+8N pattern matches Linux spec. ~5 min. | Confirmation only, not discovery |
 | M13 codebase (`driver/MagicMouseDriver.*`) | WDF filter scaffolding in place. Descriptor injection working. EvtIoDeviceControl pattern established. EvtIoDefault pass-through verified. | ~60% of plumbing done |
 | Existing M13 build pipeline | `mm-task-runner.ps1 BUILD` route auto-mounts EWDK, calls mm-dev.ps1 -Phase Build. SIGN phase signs .sys+.cat. | Tested (Session 14 H-026 + earlier sessions) |
 
-## Phased plan
+## MOUSE2_REPORT_ID byte layout (per Linux master, lines 461-490)
 
-### M14a - Discovery via PacketLogger (1 session, ~4 hrs)
+```
+Total report size: 8 (no touches) OR 14 + 8*N (where N = touch count, max 15)
 
-Goal: characterize v3's RID 0x27 multi-touch byte format from real gestures.
+Header (bytes 0..13, 14 bytes):
+  [0]      = 0x12                  (RID, MOUSE2_REPORT_ID)
+  [1]      = clicks                (button state)
+  [2..3]   = X movement            (signed 16-bit BE: (data[3]<<24 | data[2]<<16) >> 16)
+  [4..5]   = Y movement            (signed 16-bit BE: (data[5]<<24 | data[4]<<16) >> 16)
+  [6..10]  = (other state)
+  [11..13] = device timestamp      (Linux ignores)
 
-Setup:
-- Pair v3 mouse to MacBook
-- Open Apple Bluetooth Explorer or PacketLogger
-- Confirm reception of RID 0x27 reports during touch
-
-Capture protocol (~30-60 captures total):
-| Gesture | Iterations | Purpose |
-|---|---|---|
-| No touch (idle) | 5 sec baseline | Identify zero-state byte pattern |
-| Single finger contact (no movement) | 5 captures | Identify contact-presence bits |
-| Single finger Y-movement up 10px | 10 captures | Map Y-delta encoding |
-| Single finger Y-movement down 10px | 10 captures | Confirm signed Y-delta |
-| Single finger X-movement | 10 captures | Map X-delta encoding |
-| Two-finger scroll up | 10 captures | Map multi-finger encoding |
-| Two-finger scroll down | 10 captures | Confirm direction |
-| Two-finger horizontal | 5 captures | Pan direction |
-| Three-finger swipe (deferred) | 0 - scope creep | Skip for v1 |
-
-Decode each capture against the prior — diff the bytes. Build a byte-position-to-meaning map. Save to `docs/M14-V3-RID27-BYTE-LAYOUT.md`.
-
-Cross-reference against:
-- Ghidra'd MagicMouse.sys — find the RID 0x27 parsing function, confirm byte interpretations
-- Linux hid-magicmouse.c MOUSE_REPORT_ID / MOUSE2_REPORT_ID parsing — see if any structure transfers
-
-Output: byte-layout reference doc + sanity-checked finger/X/Y/pressure decoder.
-
-### M14b - Translation logic (1-2 sessions)
-
-Goal: pure C/C++ function that converts a raw RID 0x27 byte buffer into a standard mouse RID 0x02 buffer with Wheel + AC-Pan values.
-
-Reference: Linux `magicmouse_emit_touch()` and `magicmouse_raw_event()` for the math (scroll velocity from finger Y-delta over time, dead-zone, acceleration curve).
-
-```c
-// pseudo-code
-NTSTATUS TranslateRid27ToWheel(
-    PUCHAR rid27Buffer, ULONG rid27Length,
-    PUCHAR rid02Buffer, PULONG rid02Length)
-{
-    if (rid27Buffer[0] != 0x27 || rid27Length < 46) return STATUS_INVALID_PARAMETER;
-
-    // Per M14a byte map (TBD):
-    UCHAR fingerCount = rid27Buffer[<offset>];
-    if (fingerCount != 2) return STATUS_NOT_FOUND;  // only handle 2-finger scroll for v1.0
-
-    SHORT y0 = ParseSignedY(rid27Buffer, <offsets>);
-    SHORT y1 = ParseSignedY(rid27Buffer, <offsets>);
-    SHORT yScroll = (y0 + y1) / 2;  // average vertical delta
-
-    SHORT wheelTicks = ApplyAccelCurve(yScroll, prev_yScroll, time_delta);
-
-    // Build RID 0x02 mouse report with Wheel field set
-    rid02Buffer[0] = 0x02;
-    rid02Buffer[1] = 0;     // buttons
-    rid02Buffer[2] = 0;     // X
-    rid02Buffer[3] = 0;     // Y
-    rid02Buffer[4] = (UCHAR)wheelTicks;  // Wheel
-    *rid02Length = 5;
-    return STATUS_SUCCESS;
-}
+Touch points (bytes 14..14+8*N, 8 bytes each):
+  Parsed by magicmouse_emit_touch() — extracts finger position, pressure, contact area.
+  Touch tracking math + scroll synthesis in lines 214..360 of hid-magicmouse.c.
 ```
 
-Unit-test in user-mode test harness with captured byte buffers from M14a. Get scroll-direction-correct + magnitude-reasonable output before touching the kernel.
+Scroll synthesis: `magicmouse_emit_touch` calls `input_report_rel(REL_WHEEL/REL_HWHEEL/...)` based on finger Y/X deltas, with HI_RES variants for smooth scrolling.
+
+## Phased plan
+
+### M14a - Confirm RID + size pattern (1 session, ~1 hr)
+
+Goal: verify v3 over Bluetooth actually emits RID 0x12 with the `14 + 8*N` size pattern Linux expects.
+
+- Capture one 2-finger scroll on MacBook with PacketLogger
+- Confirm: first byte 0x12, total size matches `14 + 8*N` for N>0
+- Save the capture to `.ai/captures/M14-confirm-rid-<date>/` for archival
+
+If confirmed: proceed directly to M14b. If RID is something else (e.g., 0x27 like PSN H-014 noted), we revert to discovery-mode but Linux's MOUSE2 algorithm still applies as a starting point.
+
+### M14b - Port Linux MOUSE2 handler to C/WDF (1 session, ~6 hrs)
+
+Goal: re-implement Linux's MOUSE2_REPORT_ID code path in our `driver/MagicMouseDriver.c`.
+
+Functions to port (from `drivers/hid/hid-magicmouse.c`):
+- `magicmouse_raw_event()` MOUSE2 case — header parsing (lines 461-490)
+- `magicmouse_emit_touch()` — finger touch decoding + scroll math (lines 214-360)
+- `magicmouse_emit_buttons()` — button emission (lines 177-213)
+
+Output: pure C function `TranslateMouse2ToHid(BYTE* in, ULONG inLen, BYTE* out, ULONG* outLen)` that takes a RID 0x12 buffer and produces a standard RID 0x02 mouse report with Wheel/HWheel set.
+
+Unit-test in user-mode harness against bytes captured in M14a. Confirm scroll direction + magnitude-reasonable output before kernel test.
+
+### M14c - Kernel wiring (1 session, ~6 hrs)
+
+Goal: hook `TranslateMouse2ToHid` into M13's existing WDF filter via EvtIoRead completion callback.
 
 ### M14c - Kernel wiring (1-2 sessions)
 
@@ -153,10 +136,11 @@ Test: install M13+M14 driver, trigger 2-finger scroll, observe Wheel events in S
 
 | Risk | Mitigation |
 |---|---|
-| RID 0x27 byte layout doesn't match Linux/Ghidra reference | PacketLogger ground-truths it |
+| v3-BT actually uses different RID than 0x12 | M14a 1-hr confirmation capture before M14b |
 | Acceleration curve feels wrong on Windows | Iterative tune, Magic Utilities binary as benchmark |
 | WDF EvtIoRead vs EvtIoDefault interaction | M13 already has the EvtIoDefault pass-through pattern (H-018) |
 | Latent bugs in our parsing causing BSOD | Driver Verifier on during dev; user-mode harness for translation logic before kernel test |
+| GPL licensing concerns from porting Linux code | Translating algorithm/spec, not literal copy; standard practice for kernel-driver work. If concerns: derive from the byte layout documentation only and write fresh implementation. |
 
 ## Build / sign / install workflow (M14 reuses existing)
 
@@ -165,17 +149,17 @@ Test: install M13+M14 driver, trigger 2-finger scroll, observe Wheel events in S
 - `mm-task-runner.ps1 INSTALL-DRIVER` route - pnputil /add-driver
 - v3 binds to MagicMouseDriver via MagicMouseDriver.inf (already specifies v3 PID per D-015)
 
-## Time estimate (with MacBook+PacketLogger)
+## Time estimate (Linux MOUSE2 port)
 
 | Phase | Effort | Cumulative |
 |---|---|---|
-| M14a Discovery | 4 hrs | 4 hrs |
-| M14b Translation logic | 8 hrs | 12 hrs |
-| M14c Kernel wiring | 6 hrs | 18 hrs |
-| M14d Polish (basic) | 4 hrs | 22 hrs |
-| Iteration / debug headroom | 8 hrs | 30 hrs |
+| M14a Confirm RID/size pattern | 1 hr | 1 hr |
+| M14b Port Linux MOUSE2 handler to C/WDF | 6 hrs | 7 hrs |
+| M14c Kernel wiring on M13 scaffold | 6 hrs | 13 hrs |
+| M14d Polish (acceleration, AC-Pan, dead zones) | 4 hrs | 17 hrs |
+| Iteration / debug headroom | 4 hrs | 21 hrs |
 
-**~30 hours of focused work / 1-2 weeks calendar time.** Each phase is a clean unit-test-able deliverable.
+**~21 hours of focused work / 3-4 sessions / ~1 week calendar time.** Each phase is a clean unit-test-able deliverable. Estimate dropped from 30 hrs because Linux already documents the byte format — no discovery phase needed beyond the 1-hr confirmation capture.
 
 ## Strategic position
 
@@ -188,3 +172,4 @@ Test: install M13+M14 driver, trigger 2-finger scroll, observe Wheel events in S
 | Date | Update |
 |------|--------|
 | 2026-05-09 | Plan written. PacketLogger access reduces estimate from 4-8 weeks to 1-2 weeks. |
+| 2026-05-10 | v1.1.0: confirmed v3 over Bluetooth uses **RID 0x12 = MOUSE2_REPORT_ID** (matches Linux master). Linux's MOUSE2 handler IS the v3 gesture engine — ~200 LOC port from GPL'd C to WDF. Estimate dropped to ~21 hrs / ~1 week. PSN-0001 H-014 / D-017 stating "RID 0x27" is corrected. PacketLogger no longer needed for byte-layout discovery — only as 1-hr confirmation. |
