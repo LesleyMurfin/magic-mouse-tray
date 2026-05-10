@@ -29,6 +29,7 @@ Provider=%MfgName%
 DriverPackageDisplayName="Magic Mouse Fix V3 (PATH-A v5 patched)"
 DriverPackageType=PlugAndPlay
 DriverVer = 05/09/2026,6.5.0.0
+PnpLockdown=1
 
 ;*****************************************
 ; Catalog file (signed with MagicMouseFix cert — recipients must install
@@ -37,15 +38,18 @@ DriverVer = 05/09/2026,6.5.0.0
 CatalogFile=MagicMouseFixV3.cat
 
 [DestinationDirs]
-DefaultDestDir = 12
+; DIRID 13 = DriverStore (modern requirement, InfVerif ERROR 1322 if 12 used).
+DefaultDestDir = 13
 
 ;*****************************************************************************
 ; Manufacturer + Hardware IDs — v3 (PID 0323) ONLY
 ;*****************************************************************************
 [Manufacturer]
-%MfgName%=MagicMouseFix, NTamd64
+; TargetOSVersion decoration .10.0...22000 = Windows 11 baseline.
+; Required because DIRID 13 in CopyFiles needs OS-version-restricted DDInstall (InfVerif ERROR 1199).
+%MfgName%=MagicMouseFix, NTamd64.10.0...22000
 
-[MagicMouseFix.NTamd64]
+[MagicMouseFix.NTamd64.10.0...22000]
 %MagicMouseFixV3.DeviceDesc%=MagicMouseFixV3,   BTHENUM\{00001124-0000-1000-8000-00805f9b34fb}_VID&0001004c_PID&0323
 
 ;*****************************************************************************
@@ -81,7 +85,7 @@ DisplayName    = %MagicMouseFixV3.SvcDesc%
 ServiceType    = %SERVICE_KERNEL_DRIVER%
 StartType      = %SERVICE_DEMAND_START%
 ErrorControl   = %SERVICE_ERROR_IGNORE%
-ServiceBinary  = %12%\MagicMouseFixV3.sys
+ServiceBinary  = %13%\MagicMouseFixV3.sys
 
 ;*****************************************************************************
 ; Source file information

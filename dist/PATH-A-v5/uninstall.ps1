@@ -1,4 +1,4 @@
-# uninstall.ps1 — PATH-A v5 INF-based rollback (SRE-Windows-corrected)
+# uninstall.ps1  -  PATH-A v5 INF-based rollback (SRE-Windows-corrected)
 #
 # Removes our INF binding and restores stock applewirelessmouse for v3. This
 # does NOT touch Apple's stock oem10.inf (which still binds applewirelessmouse
@@ -119,7 +119,7 @@ if (Test-Path $stockSys) {
     if ($md5 -ieq 'f4ae407c228c3db6147d9e3307ed5f20') {
         Write-Log "PASS: stock f4ae407c restored" "OK"
     } else {
-        Write-Log "WARN: stock binary MD5 differs from f4ae407c — may need full restore-apple-driver.ps1" "WARN"
+        Write-Log "WARN: stock binary MD5 differs from f4ae407c  -  may need full restore-apple-driver.ps1" "WARN"
     }
 }
 

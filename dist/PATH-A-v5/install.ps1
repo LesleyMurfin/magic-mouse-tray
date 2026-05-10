@@ -1,4 +1,4 @@
-# install.ps1 — PATH-A v5 INF-based install (SRE-Windows-corrected)
+# install.ps1  -  PATH-A v5 INF-based install (SRE-Windows-corrected)
 #
 # This script implements steps S3-S5 of the SRE-Windows v5 review:
 #   S3. BTHPORT cache invalidation before pnputil /restart-device
@@ -63,6 +63,28 @@ $infPath = Join-Path $BundleDir "MagicMouseFixV3.inf"
 $sysPath = Join-Path $BundleDir "MagicMouseFixV3.sys"
 $catPath = Join-Path $BundleDir "MagicMouseFixV3.cat"
 $cerPath = Join-Path $BundleDir "MagicMouseFix.cer"
+
+# 1a. Locate EWDK tools (mounted at F:\ from EWDK ISO).
+$ewdkInfVerif = 'F:\Program Files\Windows Kits\10\Tools\10.0.26100.0\x64\InfVerif.exe'
+$ewdkTraceLog = 'F:\Program Files\Windows Kits\10\bin\10.0.26100.0\x64\tracelog.exe'
+$ewdkKd       = 'F:\Program Files\Windows Kits\10\Debuggers\x64\kd.exe'
+foreach ($t in @($ewdkInfVerif, $ewdkTraceLog, $ewdkKd)) {
+    if (Test-Path $t) { Write-Log "  EWDK: $t" } else { Write-Log "  EWDK MISSING: $t (mount EWDK ISO at F:\  -  see WINDOWS-USER-CHECKLIST)" "WARN" }
+}
+
+# 1b. InfVerif pre-flight gate  -  block install if INF doesn't pass Win11 26100 driver-package validation.
+if ((Test-Path $ewdkInfVerif) -and (Test-Path $infPath)) {
+    Write-Log "Running InfVerif on $infPath"
+    $ivOut = & $ewdkInfVerif /v /w "$infPath" 2>&1
+    $ivExit = $LASTEXITCODE
+    $ivOut | ForEach-Object { Write-Log "    InfVerif: $_" }
+    if ($ivExit -ne 0) {
+        Write-Log "InfVerif FAILED (exit $ivExit). Driver package will not install." "ERROR"
+        if ($Apply) { exit 1 }
+    } else {
+        Write-Log "InfVerif PASS"
+    }
+}
 
 foreach ($p in @($infPath, $sysPath, $catPath, $cerPath)) {
     if (-not (Test-Path $p)) {
@@ -154,7 +176,7 @@ if (-not $haveV3) {
     if ($Apply) { exit 1 }
 }
 
-# 10. DriverStore state — find existing oem*.inf for applewirelessmouse and MagicMouseFixV3
+# 10. DriverStore state  -  find existing oem*.inf for applewirelessmouse and MagicMouseFixV3
 $enumDrivers = & pnputil /enum-drivers 2>&1
 $ourOemInfs = @()
 $appleOemInfs = @()
@@ -174,8 +196,8 @@ foreach ($line in $enumDrivers) {
         $current = $null
     }
 }
-Write-Log "  Apple applewirelessmouse.inf in DriverStore: $(if ($appleOemInfs) { $appleOemInfs -join ', ' } else { '(none — INCIDENT-2026-04-28 deletion still unrecovered, or never re-added)' })"
-Write-Log "  Ours MagicMouseFixV3.inf in DriverStore: $(if ($ourOemInfs) { $ourOemInfs -join ', ' } else { '(none — first install)' })"
+Write-Log "  Apple applewirelessmouse.inf in DriverStore: $(if ($appleOemInfs) { $appleOemInfs -join ', ' } else { '(none  -  INCIDENT-2026-04-28 deletion still unrecovered, or never re-added)' })"
+Write-Log "  Ours MagicMouseFixV3.inf in DriverStore: $(if ($ourOemInfs) { $ourOemInfs -join ', ' } else { '(none  -  first install)' })"
 # Note: applewirelessmouse SERVICE may exist independently of the INF (per the
 # 2026-04-28 incident on this host: INF was deleted but service registration +
 # binary at System32\drivers\applewirelessmouse.sys remain). Our renamed
@@ -198,7 +220,7 @@ Write-Log "=== INSTALL ==="
 # 11. (S3) BTHPORT cache invalidation for v3 MAC
 # BTHENUM instance ID format (validated against live registry on user's host 2026-05-09):
 #   BTHENUM\{00001124-...}_VID&0001004C_PID&0323\9&<hash>&0&<MAC>_C00000000
-# MAC sits between '&0&' and '_C' suffix. Earlier draft used '_MAC' — wrong.
+# MAC sits between '&0&' and '_C' suffix. Earlier draft used '_MAC'  -  wrong.
 foreach ($bt in ($bts | Where-Object { $_.InstanceId -match 'PID&0323' })) {
     if ($bt.InstanceId -match '&0&([0-9A-Fa-f]{12})_C\d+$') {
         $mac = $matches[1].ToUpper()
@@ -240,7 +262,7 @@ Start-Sleep -Seconds 12
 
 Write-Log "=== POST-INSTALL VERIFY ==="
 
-# 14. Confirm our FILTER is in the v3 LowerFilters list — this is the
+# 14. Confirm our FILTER is in the v3 LowerFilters list  -  this is the
 # actually-relevant signal. Our INF is a FILTER install (Include=hidbth.inf,
 # Needs=HIDBTH_Inst.NT), so the FUNCTION DRIVER bound to v3 stays as hidbth
 # and DEVPKEY_Device_DriverInfPath may return 'hidbth.inf' / 'bth.inf' rather
@@ -249,7 +271,7 @@ Write-Log "=== POST-INSTALL VERIFY ==="
 foreach ($bt in ($bts | Where-Object { $_.InstanceId -match 'PID&0323' })) {
     try {
         $boundInf = (Get-PnpDeviceProperty -InstanceId $bt.InstanceId -KeyName 'DEVPKEY_Device_DriverInfPath' -ErrorAction SilentlyContinue).Data
-        Write-Log "  v3 BTHENUM function-driver INF: $boundInf (informational — may be inbox)"
+        Write-Log "  v3 BTHENUM function-driver INF: $boundInf (informational  -  may be inbox)"
 
         $v3lf = (Get-PnpDeviceProperty -InstanceId $bt.InstanceId -KeyName 'DEVPKEY_Device_LowerFilters' -ErrorAction SilentlyContinue).Data
         $v3lfStr = if ($v3lf) { $v3lf -join ', ' } else { '(none)' }
@@ -257,7 +279,7 @@ foreach ($bt in ($bts | Where-Object { $_.InstanceId -match 'PID&0323' })) {
         if ($v3lf -contains 'MagicMouseFixV3') {
             Write-Log "  PASS: MagicMouseFixV3 in v3 LowerFilters" "OK"
         } else {
-            Write-Log "  FAIL: MagicMouseFixV3 NOT in v3 LowerFilters (INF /add-driver may have failed to write HKR — check setupapi.dev.log)" "ERROR"
+            Write-Log "  FAIL: MagicMouseFixV3 NOT in v3 LowerFilters (INF /add-driver may have failed to write HKR  -  check setupapi.dev.log)" "ERROR"
         }
     } catch {
         Write-Log "  FAIL: could not read DEVPKEY: $($_.Exception.Message)" "ERROR"
@@ -279,7 +301,7 @@ foreach ($v1 in $v1bts) {
         $v1lf = (Get-PnpDeviceProperty -InstanceId $v1.InstanceId -KeyName 'DEVPKEY_Device_LowerFilters' -ErrorAction SilentlyContinue).Data
         Write-Log "  v1 LowerFilters: $($v1lf -join ', ')"
         if ($v1lf -contains 'MagicMouseFixV3') {
-            Write-Log "  FAIL: v1 has MagicMouseFixV3 in LowerFilters — service-name isolation BROKEN" "ERROR"
+            Write-Log "  FAIL: v1 has MagicMouseFixV3 in LowerFilters  -  service-name isolation BROKEN" "ERROR"
         } else {
             Write-Log "  PASS: v1 isolated (no MagicMouseFixV3 in LowerFilters)" "OK"
         }

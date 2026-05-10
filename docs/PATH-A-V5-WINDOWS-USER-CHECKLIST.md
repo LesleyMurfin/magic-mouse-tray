@@ -13,6 +13,37 @@ linked_prd: PRD-184
 
 Linux-side fixes complete (S1 INF rename, S2 startup-repair PID guard, S3-S5 install/uninstall scripts, E_S1 static analysis). The remaining blocking items can only be done by the user on Windows.
 
+## Toolchain (must be present)
+
+| Tool | Source | Verified path |
+|---|---|---|
+| EWDK 26100 | mounted at `F:\` from `EWDK_ge_release_svc_prod1_26100_250904-1728.iso` | `F:\Program Files\Windows Kits\10\` |
+| `InfVerif.exe` | EWDK | `F:\Program Files\Windows Kits\10\Tools\10.0.26100.0\x64\InfVerif.exe` |
+| `tracelog.exe` / `tracefmt.exe` / `tracepdb.exe` | EWDK | `F:\Program Files\Windows Kits\10\bin\10.0.26100.0\x64\` |
+| `kd.exe` / `windbg.exe` / `gflags.exe` / `symchk.exe` | EWDK | `F:\Program Files\Windows Kits\10\Debuggers\x64\` |
+| Sysinternals (`livekd`, `notmyfaultc`, `dbgview`, `procmon`) | Microsoft Store: Sysinternals Suite | `C:\Program Files\WindowsApps\Microsoft.SysinternalsSuite_*_x64_*\Tools\` |
+| Symbol path | env var | `_NT_SYMBOL_PATH=SRV*C:\Symbols*https://msdl.microsoft.com/download/symbols` |
+
+## Observability strategy for the v5 install
+
+The previous BSODs (#1 0x13A heap, #2 0xD1 NULL deref at applewirelessmouse+0x9f0e) were diagnosed post-mortem from minidumps. For v5 we add **live tracing** using EWDK's `tracelog` against the KMDF runtime WPP provider — this captures every WDF callback dispatch even though `applewirelessmouse.sys` itself never calls TraceEvents.
+
+- **KMDF V1 runtime provider GUID:** `544D4C25-942C-46C5-BD06-5BBCBA7C7906`
+- **WDF In-Flight Recorder (IFR):** automatic, per-driver circular buffer captured in any kernel dump. Extract via `!wdfkd.wdflogdump applewirelessmouse` in kd.
+
+The orchestrator script `dist/PATH-A-v5/instrumented-test.ps1` chains all of this together:
+1. EWDK detection + InfVerif gate
+2. Pre-state snapshot via `scripts/mm-bt-stack-snapshot.ps1`
+3. Minidump baseline (so we know which dumps are NEW)
+4. `tracelog -start` against KMDF provider
+5. Run `install.ps1 -Apply`
+6. Soak window with periodic state snapshots + minidump watchdog
+7. `tracelog -stop` + `tracefmt` convert
+8. Post-state snapshot
+9. Summary report
+
+If a new minidump appears in `C:\Windows\Minidump\` during the soak: orchestrator copies it to the run dir, stops tracelog, and prints the post-mortem `kd.exe` recipe.
+
 ## Phase A — local file work (run on Windows host, no system mutation)
 
 These are safe — they produce files in `/mnt/c/mm-dev-queue/` (or equivalent staging dir), they do not modify System32, DriverStore, or any kernel state.
@@ -75,6 +106,20 @@ Expected output for the v5 plan to make sense:
 
 Save the output. If only v3 is paired, OQ2 is moot (no v1 to cross-fire) — the plan still benefits from the rename (defense in depth) but doesn't require it for safety.
 
+## Phase A4. Validate the dump pipeline (controlled BSOD)
+
+Before risking the v5 driver, prove on THIS host that a forced BSOD produces an analyzable minidump:
+
+```powershell
+# Run as admin. WILL BSOD the machine. Auto-reboots.
+powershell -ExecutionPolicy Bypass -File C:\mm-dev-queue\PATH-A-v5\notmyfault-validate.ps1 -Phase Trigger
+
+# After the auto-reboot:
+powershell -ExecutionPolicy Bypass -File C:\mm-dev-queue\PATH-A-v5\notmyfault-validate.ps1 -Phase Analyze
+```
+
+Phase=Analyze runs `kd.exe -z` with `!analyze -v` against the new minidump. If it produces a clean BUGCHECK_CODE + FAILURE_BUCKET_ID, the pipeline is proven and we can proceed to install. If no minidump appears: investigate before continuing (Fast Startup, dump config, pagefile size).
+
 ## Phase B — empirical pre-tests on a probe machine (NOT the user's daily driver)
 
 If you don't have a probe machine, **stop here**. The remaining tests on the daily driver are too risky given the BSOD recovery time.
@@ -129,27 +174,33 @@ Expected: Data = `MagicMouseFixV3.inf` (or oem<NN>.inf where the published name 
 
 If Data shows `oem10.inf` (Apple's stock), then **WHQL won the ranking** — our INF installed but did not bind. That confirms OQ1 of the SRE-Windows review and means we need a different binding strategy (e.g., direct LowerFilters override post-install, or stronger signing).
 
-## Phase C — install on daily driver (only after B1+B2 pass)
-
-If B1 and B2 BOTH pass on the probe machine:
+## Phase C - install via instrumented orchestrator (only after A4 passes; B1+B2 ideally also)
 
 ```powershell
-# 1. Disable Fast Startup (S4)
+# 1. Disable Fast Startup (S4) - one-time
 powercfg /h off
-# Reboot once to clear any hibernation state
 
-# 2. Run the install script in dry-run mode first:
-powershell -ExecutionPolicy Bypass -File C:\mm-dev-queue\PATH-A-v5\install.ps1
-# Read the output. If pre-flight passes, proceed.
+# 2. Enable testsigning - one-time, requires reboot
+bcdedit /set testsigning on
+# Reboot the host once after both 1 and 2 are set.
 
-# 3. Run with -Apply (admin):
-powershell -ExecutionPolicy Bypass -File C:\mm-dev-queue\PATH-A-v5\install.ps1 -Apply
+# 3. Stage the bundle to C:\ (must be on C: drive, not WSL UNC, for pnputil)
+# Already done in Phase A1+A2.
 
-# Read the install log carefully. The post-install verification block must show:
-#   - PASS: our INF is bound
-#   - PASS: v1 isolated (no MagicMouseFixV3 in LowerFilters)
-#   - service MagicMouseFixV3: Status=Running
-#   - v3 HIDClass children (Status=OK): 2  (COL01 + COL02)
+# 4. Run the orchestrator in dry-run first to confirm pre-flight is green:
+powershell -ExecutionPolicy Bypass -File C:\mm-dev-queue\PATH-A-v5\instrumented-test.ps1 -SoakSeconds 30
+
+# 5. If green, run live (admin):
+powershell -ExecutionPolicy Bypass -File C:\mm-dev-queue\PATH-A-v5\instrumented-test.ps1 -Apply -SoakSeconds 1800
+
+# Orchestrator output is at C:\mm-dev-queue\PATH-A-v5\runs\run-<ts>\:
+#   - orchestrator.log         (full timeline)
+#   - pre-state.txt            (BTHENUM/services/HID children before)
+#   - install-output.log       (install.ps1 child output, includes InfVerif)
+#   - kmdf-trace.etl + .txt    (every WDF callback during install + soak)
+#   - state-cycle-<n>.txt      (periodic during soak)
+#   - post-state.txt           (state after soak completes or BSOD detected)
+#   - bsod-*.dmp               (any new minidumps captured during soak)
 ```
 
 ## Phase D — soak + rollback readiness
@@ -169,16 +220,30 @@ powershell -ExecutionPolicy Bypass -File <repo>\scripts\gather-telemetry.ps1 `
 powershell -ExecutionPolicy Bypass -File C:\mm-dev-queue\PATH-A-v5\uninstall.ps1
 ```
 
-## Phase E — if BSOD reproduces
+## Phase E - if BSOD reproduces
 
-If a BSOD occurs even with all S1-S5 + E_S1 follow-ups complete:
+If a BSOD occurs during the orchestrator soak, the watchdog already copied the minidump(s) into the run dir (`C:\mm-dev-queue\PATH-A-v5\runs\run-<ts>\bsod-*.dmp`) and stopped tracelog. Post-mortem recipe:
 
-1. Capture the minidump from C:\Windows\Minidump\
-2. Run `analyze-minidump.ps1` (existing in repo `/mnt/d/Users/Lesley/Downloads/MagicMouse2DriversWin11x64-master/AppleWirelessMouse/`) for kd.exe `!analyze -v`
-3. Save to `docs/PATH-A-V5-BSOD-<date>.md`
-4. Compare crash IP against +0x9f0e (BSOD #2 signature) and 0x13A heap signatures (BSOD #1)
-5. Update PSN-0001 with new evidence
-6. Run `dist/PATH-A-v5/uninstall.ps1` to restore stock
+```powershell
+$kd  = 'F:\Program Files\Windows Kits\10\Debuggers\x64\kd.exe'
+$run = 'C:\mm-dev-queue\PATH-A-v5\runs\run-<ts>'
+$env:_NT_SYMBOL_PATH = 'SRV*C:\Symbols*https://msdl.microsoft.com/download/symbols'
+
+# Single-pass analysis with WDF IFR extraction:
+& $kd -z "$run\bsod-*.dmp" -c '.sympath '+$env:_NT_SYMBOL_PATH+';.reload /f;!analyze -v;!wdfkd.wdflogdump applewirelessmouse;!wdfkd.wdfdriverinfo applewirelessmouse;q' -logo "$run\kd-analyze.txt"
+
+# Cross-check crash signature against prior BSODs:
+#   BSOD #2 2026-05-08: applewirelessmouse+0x9f0e cmp byte ptr [rax],0xa1 with rax=NULL (0xD1)
+#   BSOD #1 2026-05-07: 0x13A KERNEL_MODE_HEAP_CORRUPTION type 0x17 LFH delay-free list
+```
+
+Compare:
+1. `BUGCHECK_CODE`, `FAILURE_BUCKET_ID`, `MODULE_NAME` from `kd-analyze.txt`
+2. WDF IFR last few thousand events from `!wdfkd.wdflogdump` - this shows every WDF callback applewirelessmouse.sys received before the crash
+3. `kmdf-trace.etl.txt` from the orchestrator run for the system-wide KMDF event timeline
+4. `state-cycle-*.txt` snapshots for the LowerFilters/Stack progression
+
+Save findings to `docs/PATH-A-V5-BSOD-<date>.md`. Update PSN-0001 with new H/D entries. Run `uninstall.ps1` to restore stock.
 
 At that point, PATH-A v5 is empirically confirmed to have unresolved BSOD risk and the strategic call (PATH-A vs PATH-B) becomes the user's to make.
 
