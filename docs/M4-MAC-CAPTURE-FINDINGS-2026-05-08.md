@@ -350,6 +350,15 @@ on PSM 0x11 is rejected. Two known workarounds:
 
 For a probe / proof-of-concept, the first workaround is acceptable.
 
+## Note on the V3 Magic Mouse
+
+**The V3 Magic Mouse (PID `0x0323`) uses a different battery protocol entirely**
+— device-pushed Input on RID `0x90`, no `43 47` query, and a separate
+multi-touch RID `0x12`. See [`M4-V3-MOUSE-MAC-CAPTURE-FINDINGS-2026-05-10.md`](M4-V3-MOUSE-MAC-CAPTURE-FINDINGS-2026-05-10.md)
+for the byte-level analysis. The Windows reader code for V3 already exists
+in [`MouseBatteryReader.cs`](../MagicMouseTray/MouseBatteryReader.cs); the
+remaining V3 blocker is the HidBth descriptor cache issue tracked under M3/M13.
+
 ## Cross-device confirmation: V1 Magic Mouse uses the same battery protocol
 
 Captured `magic-mouse -v1_battery_with_restart.pklg` against the V1 Magic
