@@ -116,17 +116,17 @@ if (-not (Test-Admin)) {
     if ($Apply) { exit 1 }
 }
 
-# 4. Fast Startup check (SRE-Windows S4)
+# 4. Fast Startup check (SRE-Windows S4) - WARN only, does not block install.
+# pnputil-based install does not depend on PFRO or cold-boot SMSS; the BTHPORT
+# cache invalidation step uses runtime registry mutation, works regardless.
+# Fast Startup OFF is preferred for the 72h soak interpretation (so any reboot
+# during soak is a true cold-boot that actually clears latent kernel state)
+# but is not required for the install itself to function correctly.
 $hibState = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name HiberbootEnabled -ErrorAction SilentlyContinue).HiberbootEnabled
 if ($hibState -eq 1) {
-    Write-Log "Fast Startup is ENABLED (HiberbootEnabled=1). Disable it: 'powercfg /h off'." "ERROR"
-    Write-Log "Reason: Fast Startup hibernates instead of cold-booting; PFRO renames don't run; BTHPORT cache state can persist across 'reboots'." "ERROR"
-    if ($Apply) {
-        Write-Log "Refusing to install with Fast Startup enabled. Run 'powercfg /h off' (admin) and reboot once before retrying." "ERROR"
-        exit 1
-    }
+    Write-Log "Fast Startup is ENABLED (HiberbootEnabled=1). Install will proceed; soak interpretation may be affected if you reboot during the soak window." "WARN"
 } else {
-    Write-Log "  Fast Startup OK (HiberbootEnabled=$hibState)"
+    Write-Log "  Fast Startup OFF (HiberbootEnabled=$hibState) - cold-boot reboots fully clear kernel state"
 }
 
 # 5. Testsigning check.
