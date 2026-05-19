@@ -31,7 +31,7 @@ $anyReboot   = $false
 $anyRepaired = $false
 
 foreach ($pid4 in $targetPids) {
-    $pidUpper = $pid4.ToUpper()
+    ${pidUpper} = $pid4.ToUpper()
 
     # Find the BTHENUM HID parent device for this PID.
     # Hardware ID format: BTHENUM\{00001124...}_VID&NNNN_PID&NNNN
@@ -45,11 +45,11 @@ foreach ($pid4 in $targetPids) {
         Select-Object -First 1
 
     if (-not $btDevice) {
-        Write-Log "PID 0x$pidUpper: not paired or not ready - skipping"
+        Write-Log "PID 0x${pidUpper}: not paired or not ready - skipping"
         continue
     }
 
-    Write-Log "PID 0x$pidUpper: BTHENUM = $($btDevice.InstanceId)"
+    Write-Log "PID 0x${pidUpper}: BTHENUM = $($btDevice.InstanceId)"
 
     # Count HIDClass child devices.
     $hidDevices = @(Get-PnpDevice -ErrorAction SilentlyContinue |
@@ -59,7 +59,7 @@ foreach ($pid4 in $targetPids) {
             $_.Status -eq 'OK'
         })
     $hidCount = $hidDevices.Count
-    Write-Log "PID 0x$pidUpper: HID count = $hidCount"
+    Write-Log "PID 0x${pidUpper}: HID count = $hidCount"
 
     # Ensure LowerFilters contains MagicMouseDriver.
     # pnputil /add-driver should have set this, but verify.
@@ -67,16 +67,16 @@ foreach ($pid4 in $targetPids) {
     if (Test-Path $devRegPath) {
         $lf = (Get-ItemProperty -Path $devRegPath -Name "LowerFilters" -ErrorAction SilentlyContinue)."LowerFilters"
         if ($lf -notcontains $svcName) {
-            Write-Log "PID 0x$pidUpper: adding $svcName to LowerFilters"
+            Write-Log "PID 0x${pidUpper}: adding $svcName to LowerFilters"
             $newLf = @($lf) + $svcName | Where-Object { $_ }
             Set-ItemProperty -Path $devRegPath -Name "LowerFilters" -Value $newLf -Type MultiString -ErrorAction SilentlyContinue
         } else {
-            Write-Log "PID 0x$pidUpper: LowerFilters already contains $svcName"
+            Write-Log "PID 0x${pidUpper}: LowerFilters already contains $svcName"
         }
     }
 
     # Restart device to bind filter.
-    Write-Log "PID 0x$pidUpper: pnputil /restart-device $($btDevice.InstanceId)"
+    Write-Log "PID 0x${pidUpper}: pnputil /restart-device $($btDevice.InstanceId)"
     $restartOut = & pnputil /restart-device "$($btDevice.InstanceId)" 2>&1
     $restartOut | ForEach-Object { Write-Log "  $_" }
     Start-Sleep -Seconds $SettleSeconds
@@ -91,10 +91,10 @@ foreach ($pid4 in $targetPids) {
     $hidCountAfter = $hidAfter.Count
 
     if ($hidCountAfter -ge 1) {
-        Write-Log "PID 0X$pidUpper: HID OK ($hidCountAfter)"
+        Write-Log "PID 0X${pidUpper}: HID OK ($hidCountAfter)"
         $anyRepaired = $true
     } else {
-        Write-Log "PID 0X$pidUpper: HID FAIL ($hidCountAfter) after restart"
+        Write-Log "PID 0X${pidUpper}: HID FAIL ($hidCountAfter) after restart"
     }
 }
 
