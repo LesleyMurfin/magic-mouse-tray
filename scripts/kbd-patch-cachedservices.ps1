@@ -12,6 +12,14 @@ param(
     [switch]$DryRun
 )
 
+# Stop on any error — backup must succeed before registry write proceeds (QA-SS-1)
+$ErrorActionPreference = 'Stop'
+
+# Ensure queue dir exists for backup files
+if (-not (Test-Path 'C:\mm-dev-queue')) {
+    New-Item -ItemType Directory -Force -Path 'C:\mm-dev-queue' | Out-Null
+}
+
 $base = "HKLM:\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices\$Mac"
 $insertBytes = [byte[]](0x09, 0x20, 0xB1, 0x02)
 
