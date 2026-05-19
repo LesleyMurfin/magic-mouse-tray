@@ -5,6 +5,10 @@
 #pragma once
 #include "Driver.h"
 
+// MM2_HEADER_LEN: minimum valid RID 0x12 (MOUSE2_REPORT_ID) buffer length.
+// Format: 1-byte RID + 13-byte header = 14 bytes with 0 touch points.
+#define MM2_HEADER_LEN 14
+
 // SCROLL_THRESHOLD: accumulated Y (or X) delta required to emit one WM_MOUSEWHEEL tick.
 // Linux default is 256 (in 1/1000 mm units). Start conservative; tune empirically.
 #define SCROLL_THRESHOLD 256
