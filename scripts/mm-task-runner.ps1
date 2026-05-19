@@ -889,6 +889,40 @@ try {
             }
         }
         Log "STARTUP-REPAIR exited $rc; log at $srLog"
+
+    # KBD-PATCH: run kbd-patch-cachedservices.ps1 to fix Apple keyboard SDP cache.
+    # Request format: KBD-PATCH|<nonce>|<mac-address>  (12 hex digits, no colons)
+    } elseif ($phase -eq 'KBD-PATCH') {
+        $kbdMac    = if ($parts.Count -gt 2) { $parts[2].Trim() } else { '' }
+        $kbdLog    = Join-Path $QueueDir "kbd-patch-$nonce.log"
+        $kbdScript = $null
+        $kbdCandidates = @(
+            '\\wsl.localhost\Ubuntu\home\lesley\projects\magic-mouse-tray-sprint\scripts\kbd-patch-cachedservices.ps1',
+            'D:\mm3-driver\scripts\kbd-patch-cachedservices.ps1'
+        )
+        foreach ($c in $kbdCandidates) {
+            if (Test-Path $c) { $kbdScript = $c; break }
+        }
+        if (-not $kbdScript) {
+            "ERROR: kbd-patch-cachedservices.ps1 not found" | Set-Content $kbdLog -Encoding ASCII
+            $rc = 127
+        } elseif (-not $kbdMac) {
+            "ERROR: KBD-PATCH requires MAC address as 3rd arg" | Set-Content $kbdLog -Encoding ASCII
+            $rc = 2
+        } else {
+            try {
+                "=== KBD-PATCH: $kbdScript -Mac $kbdMac ===" | Set-Content $kbdLog -Encoding ASCII
+                & powershell.exe -ExecutionPolicy Bypass -File $kbdScript -Mac $kbdMac 2>&1 |
+                    Add-Content $kbdLog -Encoding ASCII
+                $rc = $LASTEXITCODE
+                if ($null -eq $rc) { $rc = 0 }
+            } catch {
+                "Exception: $_" | Add-Content $kbdLog -Encoding ASCII
+                $rc = 99
+            }
+        }
+        Log "KBD-PATCH exited $rc; log at $kbdLog"
+
     } else {
         # Default: route to mm-dev.ps1 -Phase $phase
         $candidates = @(
