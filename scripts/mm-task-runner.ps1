@@ -972,27 +972,36 @@ try {
         }
         Log "REINSTALL-SPRINT exited $rc; log at $rsLog"
 
-    # COLLECT-DEBUG: run collect-debug.ps1 to gather PE headers, UD2 search, event logs, device status
-    } elseif ($phase -eq 'COLLECT-DEBUG') {
-        $cdLog    = Join-Path $QueueDir "debug-collect-$nonce.log"
-        $cdScript = 'D:\mm3-driver\scripts\collect-debug.ps1'
-        $cdOut    = Join-Path $QueueDir "debug-collect.txt"
-        if (-not (Test-Path $cdScript)) {
-            "ERROR: collect-debug.ps1 not found at $cdScript" | Set-Content $cdLog -Encoding ASCII
+    # COLLECT-FORENSICS: run existing collect-forensics.ps1 + mm-pnp-eventlog.ps1
+    # Saves full forensics bundle to C:\mm-dev-queue\forensics-<timestamp>\
+    } elseif ($phase -eq 'COLLECT-FORENSICS') {
+        $cfLog    = Join-Path $QueueDir "collect-forensics-$nonce.log"
+        $cfScript = 'D:\mm3-driver\scripts\collect-forensics.ps1'
+        $pnpScript = '\\wsl.localhost\Ubuntu\home\lesley\projects\magic-mouse-tray-sprint\scripts\mm-pnp-eventlog.ps1'
+        $cfOutDir = "C:\mm-dev-queue\forensics-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        if (-not (Test-Path $cfScript)) {
+            "ERROR: collect-forensics.ps1 not found at $cfScript" | Set-Content $cfLog -Encoding ASCII
             $rc = 127
         } else {
             try {
-                "=== COLLECT-DEBUG: $cdScript ===" | Set-Content $cdLog -Encoding ASCII
-                & powershell.exe -ExecutionPolicy Bypass -File $cdScript -OutFile $cdOut 2>&1 |
-                    Add-Content $cdLog -Encoding ASCII
+                "=== COLLECT-FORENSICS: $cfScript ===" | Set-Content $cfLog -Encoding ASCII
+                & powershell.exe -ExecutionPolicy Bypass -File $cfScript -OutDir $cfOutDir 2>&1 |
+                    Add-Content $cfLog -Encoding ASCII
                 $rc = $LASTEXITCODE
                 if ($null -eq $rc) { $rc = 0 }
+                # Also run PnP event log if accessible
+                if (Test-Path $pnpScript) {
+                    "=== PNP-EVENTLOG: $pnpScript ===" | Add-Content $cfLog -Encoding ASCII
+                    & powershell.exe -ExecutionPolicy Bypass -File $pnpScript -OutDir $cfOutDir 2>&1 |
+                        Add-Content $cfLog -Encoding ASCII
+                }
+                "Output dir: $cfOutDir" | Add-Content $cfLog -Encoding ASCII
             } catch {
-                "Exception: $_" | Add-Content $cdLog -Encoding ASCII
+                "Exception: $_" | Add-Content $cfLog -Encoding ASCII
                 $rc = 99
             }
         }
-        Log "COLLECT-DEBUG exited $rc; output at $cdOut"
+        Log "COLLECT-FORENSICS exited $rc; bundle at $cfOutDir"
 
     } else {
         # Default: route to mm-dev.ps1 -Phase $phase
