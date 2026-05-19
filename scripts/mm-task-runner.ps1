@@ -923,6 +923,77 @@ try {
         }
         Log "KBD-PATCH exited $rc; log at $kbdLog"
 
+    # UNINSTALL-DRIVER: remove MagicMouseDriver LowerFilters + delete oem*.inf
+    } elseif ($phase -eq 'UNINSTALL-DRIVER') {
+        $uLog    = Join-Path $QueueDir "uninstall-driver-$nonce.log"
+        $uScript = $null
+        $uCandidates = @(
+            'D:\mm3-driver\scripts\uninstall-mmdriver.ps1',
+            '\\wsl.localhost\Ubuntu\tmp\uninstall-mmdriver.ps1'
+        )
+        foreach ($c in $uCandidates) {
+            if (Test-Path $c) { $uScript = $c; break }
+        }
+        if (-not $uScript) {
+            "ERROR: uninstall-mmdriver.ps1 not found" | Set-Content $uLog -Encoding ASCII
+            $rc = 127
+        } else {
+            try {
+                "=== UNINSTALL-DRIVER: $uScript ===" | Set-Content $uLog -Encoding ASCII
+                & powershell.exe -ExecutionPolicy Bypass -File $uScript 2>&1 |
+                    Add-Content $uLog -Encoding ASCII
+                $rc = $LASTEXITCODE
+                if ($null -eq $rc) { $rc = 0 }
+            } catch {
+                "Exception: $_" | Add-Content $uLog -Encoding ASCII
+                $rc = 99
+            }
+        }
+        Log "UNINSTALL-DRIVER exited $rc; log at $uLog"
+
+    # REINSTALL-SPRINT: copy sprint .sys from D:\mm3-driver\x64\Debug, re-sign, re-cat, re-install
+    } elseif ($phase -eq 'REINSTALL-SPRINT') {
+        $rsLog    = Join-Path $QueueDir "reinstall-sprint-$nonce.log"
+        $rsScript = 'D:\mm3-driver\scripts\reinstall-sprint-driver.ps1'
+        if (-not (Test-Path $rsScript)) {
+            "ERROR: reinstall-sprint-driver.ps1 not found at $rsScript" | Set-Content $rsLog -Encoding ASCII
+            $rc = 127
+        } else {
+            try {
+                "=== REINSTALL-SPRINT: $rsScript ===" | Set-Content $rsLog -Encoding ASCII
+                & powershell.exe -ExecutionPolicy Bypass -File $rsScript 2>&1 |
+                    Add-Content $rsLog -Encoding ASCII
+                $rc = $LASTEXITCODE
+                if ($null -eq $rc) { $rc = 0 }
+            } catch {
+                "Exception: $_" | Add-Content $rsLog -Encoding ASCII
+                $rc = 99
+            }
+        }
+        Log "REINSTALL-SPRINT exited $rc; log at $rsLog"
+
+    # COLLECT-DEBUG: run collect-debug.ps1 to gather PE headers, UD2 search, event logs, device status
+    } elseif ($phase -eq 'COLLECT-DEBUG') {
+        $cdLog    = Join-Path $QueueDir "debug-collect-$nonce.log"
+        $cdScript = 'D:\mm3-driver\scripts\collect-debug.ps1'
+        $cdOut    = Join-Path $QueueDir "debug-collect.txt"
+        if (-not (Test-Path $cdScript)) {
+            "ERROR: collect-debug.ps1 not found at $cdScript" | Set-Content $cdLog -Encoding ASCII
+            $rc = 127
+        } else {
+            try {
+                "=== COLLECT-DEBUG: $cdScript ===" | Set-Content $cdLog -Encoding ASCII
+                & powershell.exe -ExecutionPolicy Bypass -File $cdScript -OutFile $cdOut 2>&1 |
+                    Add-Content $cdLog -Encoding ASCII
+                $rc = $LASTEXITCODE
+                if ($null -eq $rc) { $rc = 0 }
+            } catch {
+                "Exception: $_" | Add-Content $cdLog -Encoding ASCII
+                $rc = 99
+            }
+        }
+        Log "COLLECT-DEBUG exited $rc; output at $cdOut"
+
     } else {
         # Default: route to mm-dev.ps1 -Phase $phase
         $candidates = @(
