@@ -16,7 +16,7 @@
 #include "GestureEngine.h"
 
 // RID 0x12 (MOUSE2_REPORT_ID) layout constants (from Linux, confirmed empirically)
-#define MM2_HEADER_LEN  14    // bytes 0..13: RID + buttons + XY movement + state
+// MM2_HEADER_LEN is defined in GestureEngine.h (shared with Driver.c)
 #define MM2_TOUCH_BYTES  8    // bytes per touch point
 
 // Button state lives in bits [0..2] of byte[1] in the MOUSE2 header
