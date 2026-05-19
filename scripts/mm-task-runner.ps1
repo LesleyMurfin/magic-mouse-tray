@@ -863,9 +863,10 @@ try {
         $srLog = Join-Path $QueueDir "startup-repair-$nonce.log"
         $srScript = $null
         $srCandidates = @(
-            '\\wsl.localhost\Ubuntu\home\lesley\projects\magic-mouse-tray\startup-repair.ps1',
             'D:\mm3-driver\startup-repair.ps1',
-            'C:\mm3-pkg\startup-repair.ps1'
+            'C:\mm3-pkg\startup-repair.ps1',
+            '\\wsl.localhost\Ubuntu\home\lesley\projects\magic-mouse-tray-sprint\startup-repair-m13.ps1',
+            '\\wsl.localhost\Ubuntu\home\lesley\projects\magic-mouse-tray\startup-repair.ps1'
         )
         foreach ($c in $srCandidates) {
             if (Test-Path $c) { $srScript = $c; break }
