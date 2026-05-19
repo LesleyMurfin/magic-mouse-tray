@@ -447,10 +447,10 @@ OnSdpQueryComplete(_In_ WDFREQUEST Request, _In_ WDFIOTARGET Target,
     // battery; overwriting it with Descriptor C would break v1 battery permanently.
     // ProductId == 0 means we could not read the PID — allow injection (safe
     // fallback: preserves behaviour for unknown devices, same as before this guard).
-    if (ctx->ProductId != 0 && ctx->ProductId != 0x0323)
+    if (ctx->ProductId != 0 && ctx->ProductId != MM_PID_V3)
     {
-        DbgPrint("M13: OnSdpQueryComplete — PID=0x%04X is not v3, pass-through (no injection)\n",
-                 ctx->ProductId);
+        DbgPrint("M13: OnSdpQueryComplete — PID=0x%04X is not v3 (0x%04X), pass-through (no injection)\n",
+                 ctx->ProductId, (USHORT)MM_PID_V3);
         WdfRequestComplete(Request, status);
         return;
     }

@@ -27,6 +27,12 @@
 // 'M13D' little-endian — pool tag for all M13 allocations
 #define M13_POOL_TAG 'D31M'
 
+// Known Apple Magic Mouse Bluetooth Product IDs.
+// Used by ProductId PID guard in OnSdpQueryComplete (PR-SS-1).
+#define MM_PID_V3   0x0323u   // Magic Mouse 2024 (USB-C) — Descriptor C target
+#define MM_PID_V1A  0x030Du   // Magic Mouse 2 (Lightning, batch A)
+#define MM_PID_V1B  0x0310u   // Magic Mouse 2 (Lightning, batch B)
+
 // IOCTL_BTH_SDP_SERVICE_SEARCH_ATTRIBUTE
 // CTL_CODE(FILE_DEVICE_BLUETOOTH=0x41, Function=0x84, METHOD_BUFFERED=0, FILE_ANY_ACCESS=0)
 // Confirmed via RE: FUN_14000A440 checks Irp+0xB8+0x18 (IoControlCode) against this value.
