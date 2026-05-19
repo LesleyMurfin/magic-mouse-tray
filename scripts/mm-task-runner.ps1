@@ -855,6 +855,7 @@ try {
             $rc = 99
         }
         Log "PATHA-V5-UNINSTALL exited $rc; log at $unLog"
+    }
     # STARTUP-REPAIR: run startup-repair.ps1 to set LowerFilters and restart-device for
     # all known Apple Magic Mouse PIDs. Required after driver install to bind WDF filter.
     # Format: STARTUP-REPAIR|<nonce>
