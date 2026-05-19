@@ -44,6 +44,13 @@ typedef struct _DEVICE_CONTEXT
     // Default TRUE (inject) if Parameters key or value is absent.
     BOOLEAN EnableInjection;
 
+    // BT Product ID — populated at AddDevice via IoGetDeviceProperty on PDO.
+    // 0x0323 = Magic Mouse 2024 (v3) — receives Descriptor C injection.
+    // 0x030D / 0x0310 = Magic Mouse 2 (v1) — pass through native descriptor.
+    // 0 = unknown (PID could not be read) — injection allowed (safe fallback,
+    //     preserves prior behaviour for any device not positively identified as v1).
+    USHORT  ProductId;
+
     // Diagnostic counters (inspectable via Services\MagicMouseDriver\Diag).
     ULONG   IoctlInterceptCount;   // 0x410210 IOCTLs intercepted
     ULONG   SdpScanHits;           // attribute 0x0206 pattern found in buffer

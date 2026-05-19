@@ -64,6 +64,72 @@ EvtDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
 
     DbgPrint("M13: AddDevice — EnableInjection=%d\n", ctx->EnableInjection);
 
+    // Populate ProductId from hardware ID so OnSdpQueryComplete can gate
+    // Descriptor C injection to v3 (PID 0x0323) only.
+    // v1 (PIDs 0x030D / 0x0310) has a native HID descriptor with RID=0x47
+    // for battery; overwriting it with Descriptor C would break v1 battery.
+    //
+    // Hardware ID format (BT stack):
+    //   BTHENUM\{...}_VID&XXXXXXXX_PID&NNNN_REV&XXXX
+    // We scan for the substring "PID&" and parse the following 4 hex digits.
+    //
+    // IoGetDeviceProperty on the PDO works at PASSIVE_LEVEL (EvtDeviceAdd runs
+    // at PASSIVE_LEVEL), requires no extra allocation handles, and is the
+    // standard WDM approach for lower filter drivers that don't own the PDO.
+    ctx->ProductId = 0;  // safe default: unknown → injection allowed
+    {
+        PDEVICE_OBJECT pdo = WdfDeviceWdmGetPhysicalDevice(device);
+        if (pdo != NULL)
+        {
+            // Hardware ID is a REG_MULTI_SZ; allocate a 512-byte stack buffer.
+            // Typical BT hardware ID strings are well under 256 wide characters.
+            WCHAR hwIdBuf[256] = { 0 };
+            ULONG retLen = 0;
+            NTSTATUS pidStatus = IoGetDeviceProperty(
+                pdo,
+                DevicePropertyHardwareID,
+                sizeof(hwIdBuf) - sizeof(WCHAR),  // leave room for terminator
+                hwIdBuf,
+                &retLen);
+
+            if (NT_SUCCESS(pidStatus) && retLen >= sizeof(WCHAR))
+            {
+                // Scan the MULTI_SZ block (may contain multiple NUL-separated
+                // strings; we search the entire block for "PID&").
+                ULONG wcharCount = retLen / sizeof(WCHAR);
+                for (ULONG i = 0; i + 8 <= wcharCount; i++)
+                {
+                    if (hwIdBuf[i]   == L'P' &&
+                        hwIdBuf[i+1] == L'I' &&
+                        hwIdBuf[i+2] == L'D' &&
+                        hwIdBuf[i+3] == L'&')
+                    {
+                        // Parse up to 4 hex digits immediately following "PID&".
+                        USHORT pid = 0;
+                        for (ULONG j = i + 4; j < wcharCount && j < i + 8; j++)
+                        {
+                            WCHAR  c      = hwIdBuf[j];
+                            USHORT nibble = 0;
+                            if      (c >= L'0' && c <= L'9') nibble = (USHORT)(c - L'0');
+                            else if (c >= L'A' && c <= L'F') nibble = (USHORT)(c - L'A' + 10);
+                            else if (c >= L'a' && c <= L'f') nibble = (USHORT)(c - L'a' + 10);
+                            else break;
+                            pid = (USHORT)((pid << 4) | nibble);
+                        }
+                        ctx->ProductId = pid;
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                DbgPrint("M13: AddDevice — IoGetDeviceProperty(HardwareID) status=0x%08X; ProductId stays 0\n",
+                         (ULONG)pidStatus);
+            }
+        }
+        DbgPrint("M13: AddDevice — ProductId=0x%04X\n", ctx->ProductId);
+    }
+
     // Diagnostic 1 Hz timer (parent = device, fires M13_DiagTimerFunc)
     WDF_TIMER_CONFIG timerCfg;
     WDF_TIMER_CONFIG_INIT_PERIODIC(&timerCfg, M13_DiagTimerFunc, 1000);
@@ -375,6 +441,19 @@ OnSdpQueryComplete(_In_ WDFREQUEST Request, _In_ WDFIOTARGET Target,
     RtlCopyMemory(ctx->LastSdpBytes, buf, snapLen);
     if (snapLen < 64) RtlZeroMemory(ctx->LastSdpBytes + snapLen, 64 - snapLen);
     WdfSpinLockRelease(ctx->Lock);
+
+    // v1 pass-through guard: only inject Descriptor C for v3 (PID 0x0323).
+    // v1 (PIDs 0x030D / 0x0310) has a native HID descriptor with RID=0x47 for
+    // battery; overwriting it with Descriptor C would break v1 battery permanently.
+    // ProductId == 0 means we could not read the PID — allow injection (safe
+    // fallback: preserves behaviour for unknown devices, same as before this guard).
+    if (ctx->ProductId != 0 && ctx->ProductId != 0x0323)
+    {
+        DbgPrint("M13: OnSdpQueryComplete — PID=0x%04X is not v3, pass-through (no injection)\n",
+                 ctx->ProductId);
+        WdfRequestComplete(Request, status);
+        return;
+    }
 
     // Attempt descriptor rewrite.
     ULONG    newLen      = (ULONG)sdpLen;
