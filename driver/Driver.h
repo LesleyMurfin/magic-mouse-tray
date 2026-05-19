@@ -78,6 +78,11 @@ typedef struct _DEVICE_CONTEXT
     UCHAR   Rid27Ring[RID27_RING_SLOTS][RID27_BYTES_PER_SLOT];
     ULONG   Rid27RingNext;         // next write slot (0..7, wraps mod 8)
 
+    // M14: scroll accumulators — persistent across RID 0x12 reports (GestureEngine.c)
+    INT ScrollAccumY;   // accumulated Y delta, reset by SCROLL_THRESHOLD
+    INT ScrollAccumX;   // accumulated X delta (horizontal scroll)
+    ULONG Rid12Count;   // RID 0x12 reports seen (replaces legacy Rid27Count naming)
+
     WDFTIMER    DiagTimer;         // 1 Hz periodic
     WDFWORKITEM DiagWorkItem;      // PASSIVE_LEVEL flush to registry
 
@@ -96,6 +101,6 @@ EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL      EvtIoDeviceControl;
 EVT_WDF_IO_QUEUE_IO_DEFAULT             EvtIoDefault;
 EVT_WDF_IO_QUEUE_IO_READ                EvtIoRead;
 EVT_WDF_REQUEST_COMPLETION_ROUTINE      OnSdpQueryComplete;
-EVT_WDF_REQUEST_COMPLETION_ROUTINE      OnHidReadComplete;
+EVT_WDF_REQUEST_COMPLETION_ROUTINE      OnReadComplete;
 EVT_WDF_TIMER                           M13_DiagTimerFunc;
 EVT_WDF_WORKITEM                        M13_DiagWorkItemFunc;
