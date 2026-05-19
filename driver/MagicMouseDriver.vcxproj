@@ -82,12 +82,14 @@
 
   <ItemGroup>
     <ClCompile Include="Driver.c" />
+    <ClCompile Include="GestureEngine.c" />
     <ClCompile Include="HidDescriptor.c" />
     <ClCompile Include="InputHandler.c" />
   </ItemGroup>
 
   <ItemGroup>
     <ClInclude Include="Driver.h" />
+    <ClInclude Include="GestureEngine.h" />
     <ClInclude Include="HidDescriptor.h" />
     <ClInclude Include="InputHandler.h" />
   </ItemGroup>

@@ -32,7 +32,7 @@ ClassGUID   = {745A17A0-74D3-11D0-B6FE-00A0C90F57DA}
 Provider    = %ManufacturerName%
 DriverPackageDisplayName = %DeviceDesc%
 DriverPackageType = PlugAndPlay
-DriverVer   = 01/01/2027,2.0.0.0
+DriverVer   = 05/18/2026,2.0.0.0
 CatalogFile = MagicMouseDriver.cat
 PnpLockdown = 1
 
@@ -43,7 +43,11 @@ DefaultDestDir = 12
 %ManufacturerName% = MagicMouseDriver, NTamd64
 
 [MagicMouseDriver.NTamd64]
-%DeviceDesc% = MagicMouseDriver_Install, BTHENUM\{00001124-0000-1000-8000-00805F9B34FB}_VID&0001004C_PID&0323
+; Magic Mouse 2024 (v3), VID 0x004C
+%DeviceDesc%    = MagicMouseDriver_Install, BTHENUM\{00001124-0000-1000-8000-00805F9B34FB}_VID&0001004C_PID&0323
+; Magic Mouse (v1) — PID 030D (main) and 0310 (wireless), VID 0x05AC
+%DeviceDescV1%  = MagicMouseDriver_Install, BTHENUM\{00001124-0000-1000-8000-00805F9B34FB}_VID&000105AC_PID&030D
+%DeviceDescV1B% = MagicMouseDriver_Install, BTHENUM\{00001124-0000-1000-8000-00805F9B34FB}_VID&000105AC_PID&0310
 
 ; ---- Install: delegate function driver to hidbth.inf, copy our filter binary ----
 
@@ -102,5 +106,7 @@ MagicMouseDriver.sys = 1,,
 [Strings]
 ManufacturerName = "Magic Mouse Driver"
 DeviceDesc       = "Apple Magic Mouse 2024 (M13 SDP filter)"
+DeviceDescV1     = "Apple Magic Mouse (v1)"
+DeviceDescV1B    = "Apple Magic Mouse (v1, wireless)"
 ServiceDesc      = "Magic Mouse Driver M13 (SDP descriptor injection)"
 DiskName         = "Magic Mouse Driver Installation Disk"

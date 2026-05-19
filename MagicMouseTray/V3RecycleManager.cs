@@ -25,7 +25,12 @@
 // Note: SelfHealManager.OnBatteryObserved sees pct>=0 (split mode) during the recycle window
 // (~8–16s). Because SelfHealManager requires 2 *consecutive* AdaptivePoller poll events showing
 // split before triggering, and the recycle completes within seconds, there is no interference.
-// If Mode B restore fails, SelfHealManager provides a fallback restore on the next poll cycle.
+//
+// Mode A entry recovery (2026-05-08): if the device is found in Mode A at cycle start
+// (e.g., post-reboot, prior cycle crashed mid-flip), the cycle now reads battery directly
+// from col02 and then restores Mode B — instead of skipping and waiting for SelfHealManager.
+// This eliminates a deadlock observed when SelfHealManager fails to fire post-boot: the
+// recycler used to skip every cycle indefinitely, leaving stale battery cache and no alerts.
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -136,13 +141,16 @@ internal sealed class V3RecycleManager : IDisposable
             return;
         }
 
-        // Pre-check 2: device must be in Mode B before we start.
-        // Mode A at entry means a prior cycle crashed mid-flip — skip and let SelfHealManager restore.
-        bool preCheckModeA = await Task.Run(IsV3InModeA, ct);
-        if (preCheckModeA)
+        // Pre-check 2: device state at entry.
+        // - Mode B (normal): full cycle = FLIP:NoFilter -> read -> FLIP:AppleFilter
+        // - Mode A (recovery): skip the FLIP:NoFilter step on attempt 1, read directly,
+        //   then FLIP:AppleFilter to restore. Earlier code skipped the cycle entirely
+        //   and deferred to SelfHealManager — that created a deadlock when SelfHeal
+        //   failed to fire post-reboot, leaving battery stale forever.
+        bool startedInModeA = await Task.Run(IsV3InModeA, ct);
+        if (startedInModeA)
         {
-            Logger.Log("V3RECYCLE pre-check: device already in Mode A — skip cycle, SelfHealManager will restore");
-            return;
+            Logger.Log("V3RECYCLE pre-check: device already in Mode A — read battery directly, then restore Mode B");
         }
 
         for (int attempt = 1; attempt <= MaxRetries; attempt++)
@@ -155,16 +163,27 @@ internal sealed class V3RecycleManager : IDisposable
                 try { await Task.Delay(RetryDelayMs, ct); } catch { return; }
             }
 
-            // Step 1: Flip to Mode A (removes LowerFilters, disable/enable PnP device)
-            bool flipOk = await Task.Run(
-                () => SelfHealRequest.SubmitFlipAndWait(FlipPhase.NoFilter, 30_000), ct);
+            // Step 1: Flip to Mode A — unless we started there on attempt 1.
+            // On retries (attempt > 1), the previous attempt restored Mode B, so we
+            // always need FLIP:NoFilter to get back into Mode A.
+            bool needsFlipToA = !(startedInModeA && attempt == 1);
 
-            if (!flipOk)
+            if (needsFlipToA)
             {
-                Logger.Log($"V3RECYCLE FLIP:NoFilter failed attempt={attempt}");
-                // Task failure is not transient — retrying won't help
-                RecordFailure("FLIP:NoFilter failed");
-                return;
+                bool flipOk = await Task.Run(
+                    () => SelfHealRequest.SubmitFlipAndWait(FlipPhase.NoFilter, 30_000), ct);
+
+                if (!flipOk)
+                {
+                    Logger.Log($"V3RECYCLE FLIP:NoFilter failed attempt={attempt}");
+                    // Task failure is not transient — retrying won't help
+                    RecordFailure("FLIP:NoFilter failed");
+                    return;
+                }
+            }
+            else
+            {
+                Logger.Log("V3RECYCLE skip FLIP:NoFilter — device already in Mode A at cycle entry");
             }
 
             // Step 2: Verify Mode A reached (col02 collection visible in HID paths)

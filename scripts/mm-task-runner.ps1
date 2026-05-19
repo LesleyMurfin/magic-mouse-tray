@@ -855,6 +855,154 @@ try {
             $rc = 99
         }
         Log "PATHA-V5-UNINSTALL exited $rc; log at $unLog"
+    }
+    # STARTUP-REPAIR: run startup-repair.ps1 to set LowerFilters and restart-device for
+    # all known Apple Magic Mouse PIDs. Required after driver install to bind WDF filter.
+    # Format: STARTUP-REPAIR|<nonce>
+    elseif ($phase -eq 'STARTUP-REPAIR') {
+        $srLog = Join-Path $QueueDir "startup-repair-$nonce.log"
+        $srScript = $null
+        $srCandidates = @(
+            'D:\mm3-driver\startup-repair.ps1',
+            'C:\mm3-pkg\startup-repair.ps1',
+            '\\wsl.localhost\Ubuntu\home\lesley\projects\magic-mouse-tray-sprint\startup-repair-m13.ps1',
+            '\\wsl.localhost\Ubuntu\home\lesley\projects\magic-mouse-tray\startup-repair.ps1'
+        )
+        foreach ($c in $srCandidates) {
+            if (Test-Path $c) { $srScript = $c; break }
+        }
+        if (-not $srScript) {
+            "ERROR: startup-repair.ps1 not found in any candidate path" | Set-Content $srLog -Encoding ASCII
+            Log "STARTUP-REPAIR: script not found"
+            $rc = 127
+        } else {
+            try {
+                "=== STARTUP-REPAIR: $srScript ===" | Set-Content $srLog -Encoding ASCII
+                & powershell.exe -ExecutionPolicy Bypass -File $srScript -LogFile (Join-Path $QueueDir "startup-repair-detail-$nonce.log") 2>&1 |
+                    Add-Content $srLog -Encoding ASCII
+                $rc = $LASTEXITCODE
+                if ($null -eq $rc) { $rc = 0 }
+            } catch {
+                "Exception: $_" | Add-Content $srLog -Encoding ASCII
+                Log "Exception in STARTUP-REPAIR: $_"
+                $rc = 99
+            }
+        }
+        Log "STARTUP-REPAIR exited $rc; log at $srLog"
+
+    # KBD-PATCH: run kbd-patch-cachedservices.ps1 to fix Apple keyboard SDP cache.
+    # Request format: KBD-PATCH|<nonce>|<mac-address>  (12 hex digits, no colons)
+    } elseif ($phase -eq 'KBD-PATCH') {
+        $kbdMac    = if ($parts.Count -gt 2) { $parts[2].Trim() } else { '' }
+        $kbdLog    = Join-Path $QueueDir "kbd-patch-$nonce.log"
+        $kbdScript = $null
+        $kbdCandidates = @(
+            '\\wsl.localhost\Ubuntu\home\lesley\projects\magic-mouse-tray-sprint\scripts\kbd-patch-cachedservices.ps1',
+            'D:\mm3-driver\scripts\kbd-patch-cachedservices.ps1'
+        )
+        foreach ($c in $kbdCandidates) {
+            if (Test-Path $c) { $kbdScript = $c; break }
+        }
+        if (-not $kbdScript) {
+            "ERROR: kbd-patch-cachedservices.ps1 not found" | Set-Content $kbdLog -Encoding ASCII
+            $rc = 127
+        } elseif (-not $kbdMac) {
+            "ERROR: KBD-PATCH requires MAC address as 3rd arg" | Set-Content $kbdLog -Encoding ASCII
+            $rc = 2
+        } else {
+            try {
+                "=== KBD-PATCH: $kbdScript -Mac $kbdMac ===" | Set-Content $kbdLog -Encoding ASCII
+                & powershell.exe -ExecutionPolicy Bypass -File $kbdScript -Mac $kbdMac 2>&1 |
+                    Add-Content $kbdLog -Encoding ASCII
+                $rc = $LASTEXITCODE
+                if ($null -eq $rc) { $rc = 0 }
+            } catch {
+                "Exception: $_" | Add-Content $kbdLog -Encoding ASCII
+                $rc = 99
+            }
+        }
+        Log "KBD-PATCH exited $rc; log at $kbdLog"
+
+    # UNINSTALL-DRIVER: remove MagicMouseDriver LowerFilters + delete oem*.inf
+    } elseif ($phase -eq 'UNINSTALL-DRIVER') {
+        $uLog    = Join-Path $QueueDir "uninstall-driver-$nonce.log"
+        $uScript = $null
+        $uCandidates = @(
+            'D:\mm3-driver\scripts\uninstall-mmdriver.ps1',
+            '\\wsl.localhost\Ubuntu\tmp\uninstall-mmdriver.ps1'
+        )
+        foreach ($c in $uCandidates) {
+            if (Test-Path $c) { $uScript = $c; break }
+        }
+        if (-not $uScript) {
+            "ERROR: uninstall-mmdriver.ps1 not found" | Set-Content $uLog -Encoding ASCII
+            $rc = 127
+        } else {
+            try {
+                "=== UNINSTALL-DRIVER: $uScript ===" | Set-Content $uLog -Encoding ASCII
+                & powershell.exe -ExecutionPolicy Bypass -File $uScript 2>&1 |
+                    Add-Content $uLog -Encoding ASCII
+                $rc = $LASTEXITCODE
+                if ($null -eq $rc) { $rc = 0 }
+            } catch {
+                "Exception: $_" | Add-Content $uLog -Encoding ASCII
+                $rc = 99
+            }
+        }
+        Log "UNINSTALL-DRIVER exited $rc; log at $uLog"
+
+    # REINSTALL-SPRINT: copy sprint .sys from D:\mm3-driver\x64\Debug, re-sign, re-cat, re-install
+    } elseif ($phase -eq 'REINSTALL-SPRINT') {
+        $rsLog    = Join-Path $QueueDir "reinstall-sprint-$nonce.log"
+        $rsScript = 'D:\mm3-driver\scripts\reinstall-sprint-driver.ps1'
+        if (-not (Test-Path $rsScript)) {
+            "ERROR: reinstall-sprint-driver.ps1 not found at $rsScript" | Set-Content $rsLog -Encoding ASCII
+            $rc = 127
+        } else {
+            try {
+                "=== REINSTALL-SPRINT: $rsScript ===" | Set-Content $rsLog -Encoding ASCII
+                & powershell.exe -ExecutionPolicy Bypass -File $rsScript 2>&1 |
+                    Add-Content $rsLog -Encoding ASCII
+                $rc = $LASTEXITCODE
+                if ($null -eq $rc) { $rc = 0 }
+            } catch {
+                "Exception: $_" | Add-Content $rsLog -Encoding ASCII
+                $rc = 99
+            }
+        }
+        Log "REINSTALL-SPRINT exited $rc; log at $rsLog"
+
+    # COLLECT-FORENSICS: run existing collect-forensics.ps1 + mm-pnp-eventlog.ps1
+    # Saves full forensics bundle to C:\mm-dev-queue\forensics-<timestamp>\
+    } elseif ($phase -eq 'COLLECT-FORENSICS') {
+        $cfLog    = Join-Path $QueueDir "collect-forensics-$nonce.log"
+        $cfScript = 'D:\mm3-driver\scripts\collect-forensics.ps1'
+        $pnpScript = '\\wsl.localhost\Ubuntu\home\lesley\projects\magic-mouse-tray-sprint\scripts\mm-pnp-eventlog.ps1'
+        $cfOutDir = "C:\mm-dev-queue\forensics-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        if (-not (Test-Path $cfScript)) {
+            "ERROR: collect-forensics.ps1 not found at $cfScript" | Set-Content $cfLog -Encoding ASCII
+            $rc = 127
+        } else {
+            try {
+                "=== COLLECT-FORENSICS: $cfScript ===" | Set-Content $cfLog -Encoding ASCII
+                & powershell.exe -ExecutionPolicy Bypass -File $cfScript -OutDir $cfOutDir 2>&1 |
+                    Add-Content $cfLog -Encoding ASCII
+                $rc = $LASTEXITCODE
+                if ($null -eq $rc) { $rc = 0 }
+                # Also run PnP event log if accessible
+                if (Test-Path $pnpScript) {
+                    "=== PNP-EVENTLOG: $pnpScript ===" | Add-Content $cfLog -Encoding ASCII
+                    & powershell.exe -ExecutionPolicy Bypass -File $pnpScript -OutDir $cfOutDir 2>&1 |
+                        Add-Content $cfLog -Encoding ASCII
+                }
+                "Output dir: $cfOutDir" | Add-Content $cfLog -Encoding ASCII
+            } catch {
+                "Exception: $_" | Add-Content $cfLog -Encoding ASCII
+                $rc = 99
+            }
+        }
+        Log "COLLECT-FORENSICS exited $rc; bundle at $cfOutDir"
+
     } else {
         # Default: route to mm-dev.ps1 -Phase $phase
         $candidates = @(

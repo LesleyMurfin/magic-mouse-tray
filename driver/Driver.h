@@ -27,6 +27,12 @@
 // 'M13D' little-endian — pool tag for all M13 allocations
 #define M13_POOL_TAG 'D31M'
 
+// Known Apple Magic Mouse Bluetooth Product IDs.
+// Used by ProductId PID guard in OnSdpQueryComplete (PR-SS-1).
+#define MM_PID_V3   0x0323u   // Magic Mouse 2024 (USB-C) — Descriptor C target
+#define MM_PID_V1A  0x030Du   // Magic Mouse 2 (Lightning, batch A)
+#define MM_PID_V1B  0x0310u   // Magic Mouse 2 (Lightning, batch B)
+
 // IOCTL_BTH_SDP_SERVICE_SEARCH_ATTRIBUTE
 // CTL_CODE(FILE_DEVICE_BLUETOOTH=0x41, Function=0x84, METHOD_BUFFERED=0, FILE_ANY_ACCESS=0)
 // Confirmed via RE: FUN_14000A440 checks Irp+0xB8+0x18 (IoControlCode) against this value.
@@ -43,6 +49,13 @@ typedef struct _DEVICE_CONTEXT
     // Configuration: read from Services\MagicMouseDriver\Parameters at AddDevice.
     // Default TRUE (inject) if Parameters key or value is absent.
     BOOLEAN EnableInjection;
+
+    // BT Product ID — populated at AddDevice via IoGetDeviceProperty on PDO.
+    // 0x0323 = Magic Mouse 2024 (v3) — receives Descriptor C injection.
+    // 0x030D / 0x0310 = Magic Mouse 2 (v1) — pass through native descriptor.
+    // 0 = unknown (PID could not be read) — injection allowed (safe fallback,
+    //     preserves prior behaviour for any device not positively identified as v1).
+    USHORT  ProductId;
 
     // Diagnostic counters (inspectable via Services\MagicMouseDriver\Diag).
     ULONG   IoctlInterceptCount;   // 0x410210 IOCTLs intercepted
@@ -65,6 +78,11 @@ typedef struct _DEVICE_CONTEXT
     UCHAR   Rid27Ring[RID27_RING_SLOTS][RID27_BYTES_PER_SLOT];
     ULONG   Rid27RingNext;         // next write slot (0..7, wraps mod 8)
 
+    // M14: scroll accumulators — persistent across RID 0x12 reports (GestureEngine.c)
+    INT ScrollAccumY;   // accumulated Y delta, reset by SCROLL_THRESHOLD
+    INT ScrollAccumX;   // accumulated X delta (horizontal scroll)
+    ULONG Rid12Count;   // RID 0x12 reports seen (replaces legacy Rid27Count naming)
+
     WDFTIMER    DiagTimer;         // 1 Hz periodic
     WDFWORKITEM DiagWorkItem;      // PASSIVE_LEVEL flush to registry
 
@@ -83,6 +101,6 @@ EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL      EvtIoDeviceControl;
 EVT_WDF_IO_QUEUE_IO_DEFAULT             EvtIoDefault;
 EVT_WDF_IO_QUEUE_IO_READ                EvtIoRead;
 EVT_WDF_REQUEST_COMPLETION_ROUTINE      OnSdpQueryComplete;
-EVT_WDF_REQUEST_COMPLETION_ROUTINE      OnHidReadComplete;
+EVT_WDF_REQUEST_COMPLETION_ROUTINE      OnReadComplete;
 EVT_WDF_TIMER                           M13_DiagTimerFunc;
 EVT_WDF_WORKITEM                        M13_DiagWorkItemFunc;

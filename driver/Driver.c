@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "Driver.h"
 #include "InputHandler.h"   // SdpRewrite_Process
+#include "GestureEngine.h"  // TranslateMouse2ToHid, MM2_HEADER_LEN
 
 // --------------------------------------------------------------------------
 // DriverEntry
@@ -64,6 +65,72 @@ EvtDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
 
     DbgPrint("M13: AddDevice — EnableInjection=%d\n", ctx->EnableInjection);
 
+    // Populate ProductId from hardware ID so OnSdpQueryComplete can gate
+    // Descriptor C injection to v3 (PID 0x0323) only.
+    // v1 (PIDs 0x030D / 0x0310) has a native HID descriptor with RID=0x47
+    // for battery; overwriting it with Descriptor C would break v1 battery.
+    //
+    // Hardware ID format (BT stack):
+    //   BTHENUM\{...}_VID&XXXXXXXX_PID&NNNN_REV&XXXX
+    // We scan for the substring "PID&" and parse the following 4 hex digits.
+    //
+    // IoGetDeviceProperty on the PDO works at PASSIVE_LEVEL (EvtDeviceAdd runs
+    // at PASSIVE_LEVEL), requires no extra allocation handles, and is the
+    // standard WDM approach for lower filter drivers that don't own the PDO.
+    ctx->ProductId = 0;  // safe default: unknown → injection allowed
+    {
+        PDEVICE_OBJECT pdo = WdfDeviceWdmGetPhysicalDevice(device);
+        if (pdo != NULL)
+        {
+            // Hardware ID is a REG_MULTI_SZ; allocate a 512-byte stack buffer.
+            // Typical BT hardware ID strings are well under 256 wide characters.
+            WCHAR hwIdBuf[256] = { 0 };
+            ULONG retLen = 0;
+            NTSTATUS pidStatus = IoGetDeviceProperty(
+                pdo,
+                DevicePropertyHardwareID,
+                sizeof(hwIdBuf) - sizeof(WCHAR),  // leave room for terminator
+                hwIdBuf,
+                &retLen);
+
+            if (NT_SUCCESS(pidStatus) && retLen >= sizeof(WCHAR))
+            {
+                // Scan the MULTI_SZ block (may contain multiple NUL-separated
+                // strings; we search the entire block for "PID&").
+                ULONG wcharCount = retLen / sizeof(WCHAR);
+                for (ULONG i = 0; i + 8 <= wcharCount; i++)
+                {
+                    if (hwIdBuf[i]   == L'P' &&
+                        hwIdBuf[i+1] == L'I' &&
+                        hwIdBuf[i+2] == L'D' &&
+                        hwIdBuf[i+3] == L'&')
+                    {
+                        // Parse up to 4 hex digits immediately following "PID&".
+                        USHORT pid = 0;
+                        for (ULONG j = i + 4; j < wcharCount && j < i + 8; j++)
+                        {
+                            WCHAR  c      = hwIdBuf[j];
+                            USHORT nibble = 0;
+                            if      (c >= L'0' && c <= L'9') nibble = (USHORT)(c - L'0');
+                            else if (c >= L'A' && c <= L'F') nibble = (USHORT)(c - L'A' + 10);
+                            else if (c >= L'a' && c <= L'f') nibble = (USHORT)(c - L'a' + 10);
+                            else break;
+                            pid = (USHORT)((pid << 4) | nibble);
+                        }
+                        ctx->ProductId = pid;
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                DbgPrint("M13: AddDevice — IoGetDeviceProperty(HardwareID) status=0x%08X; ProductId stays 0\n",
+                         (ULONG)pidStatus);
+            }
+        }
+        DbgPrint("M13: AddDevice — ProductId=0x%04X\n", ctx->ProductId);
+    }
+
     // Diagnostic 1 Hz timer (parent = device, fires M13_DiagTimerFunc)
     WDF_TIMER_CONFIG timerCfg;
     WDF_TIMER_CONFIG_INIT_PERIODIC(&timerCfg, M13_DiagTimerFunc, 1000);
@@ -95,7 +162,7 @@ EvtDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&qCfg, WdfIoQueueDispatchParallel);
     qCfg.EvtIoDeviceControl         = EvtIoDeviceControl;
     qCfg.EvtIoInternalDeviceControl = EvtIoInternalDeviceControl;
-    qCfg.EvtIoRead                  = EvtIoRead;   // M14: intercept READ completions for RID=0x27 logging
+    qCfg.EvtIoRead                  = EvtIoRead;   // M14: intercept READ completions for RID=0x12 scroll translation
     qCfg.EvtIoDefault               = EvtIoDefault;
     WDFQUEUE queue;
     return WdfIoQueueCreate(device, &qCfg, WDF_NO_OBJECT_ATTRIBUTES, &queue);
@@ -218,7 +285,7 @@ EvtIoDefault(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request)
 // --------------------------------------------------------------------------
 // EvtIoRead — M14: intercept IRP_MJ_READ completions
 //
-// Forwards the READ request with OnHidReadComplete so we can inspect the
+// Forwards the READ request with OnReadComplete so we can inspect the
 // returned buffer. HidBth fills the buffer with a HID input report on
 // completion; byte[0] is the Report ID.
 // --------------------------------------------------------------------------
@@ -232,12 +299,8 @@ EvtIoRead(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ size_t Length)
     PDEVICE_CONTEXT ctx = GetDeviceContext(device);
     WDFIOTARGET target = WdfDeviceGetIoTarget(device);
 
-    WdfSpinLockAcquire(ctx->Lock);
-    ctx->HidReadCount++;
-    WdfSpinLockRelease(ctx->Lock);
-
     WdfRequestFormatRequestUsingCurrentType(Request);
-    WdfRequestSetCompletionRoutine(Request, OnHidReadComplete, ctx);
+    WdfRequestSetCompletionRoutine(Request, OnReadComplete, ctx);
     if (!WdfRequestSend(Request, target, WDF_NO_SEND_OPTIONS))
     {
         WdfRequestComplete(Request, WdfRequestGetStatus(Request));
@@ -245,16 +308,21 @@ EvtIoRead(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ size_t Length)
 }
 
 // --------------------------------------------------------------------------
-// OnHidReadComplete — M14: log RID=0x27 raw bytes via DbgPrint
+// OnReadComplete — M14c: RID 0x12 → RID 0x02 scroll translation completion routine
 //
-// Log policy: log every report for the first 20 RID=0x27 completions,
-// then every 64th thereafter (shows it's still running without flooding).
-// Counters flushed to registry by DiagWorkItem so PowerShell can verify.
+// Replaces OnHidReadComplete. Handles IRP_MJ_READ completions:
+//   - Increments HidReadCount (total IRP_MJ_READ completions seen)
+//   - For v3 (PID 0x0323) devices: if buf[0] == 0x12 (MOUSE2_REPORT_ID),
+//     calls TranslateMouse2ToHid() to synthesize a RID 0x02 scroll report
+//   - SEH guard: IOCTL_HID_READ_REPORT may use METHOD_NEITHER buffers;
+//     accessing buf without __try/__except is a Page Fault BSOD vector
+//   - WdfRequestSetInformation: updates returned byte count after translation
+//     (missing = heap corruption in caller)
 // --------------------------------------------------------------------------
 
 VOID
-OnHidReadComplete(_In_ WDFREQUEST Request, _In_ WDFIOTARGET Target,
-                  _In_ PWDF_REQUEST_COMPLETION_PARAMS Params, _In_ WDFCONTEXT Context)
+OnReadComplete(_In_ WDFREQUEST Request, _In_ WDFIOTARGET Target,
+               _In_ PWDF_REQUEST_COMPLETION_PARAMS Params, _In_ WDFCONTEXT Context)
 {
     UNREFERENCED_PARAMETER(Target);
 
@@ -267,60 +335,45 @@ OnHidReadComplete(_In_ WDFREQUEST Request, _In_ WDFIOTARGET Target,
         return;
     }
 
-    PVOID  buf    = NULL;
-    size_t bufLen = 0;
+    PUCHAR buf    = NULL;
+    SIZE_T bufLen = 0;
     NTSTATUS rs = WdfRequestRetrieveOutputBuffer(Request, 1, &buf, &bufLen);
-    if (NT_SUCCESS(rs) && buf != NULL)
+    if (!NT_SUCCESS(rs) || buf == NULL)
     {
-        size_t bytesRead = Params->IoStatus.Information;
-        PUCHAR p = (PUCHAR)buf;
+        WdfRequestComplete(Request, status);
+        return;
+    }
 
-        if (bytesRead > 0 && p[0] == 0x27)
+    // Update diagnostic counters
+    SIZE_T bytesRead = Params->IoStatus.Information;
+    WdfSpinLockAcquire(ctx->Lock);
+    ctx->HidReadCount++;
+    if (bytesRead > 0 && bytesRead < bufLen && ((PUCHAR)buf)[0] == 0x12)
+        ctx->Rid12Count++;
+    WdfSpinLockRelease(ctx->Lock);
+
+    // __try/__except required: IOCTL_HID_READ_REPORT may use METHOD_NEITHER buffers.
+    // Accessing buf without SEH is a Page Fault BSOD vector.
+    __try
+    {
+        if (bytesRead >= MM2_HEADER_LEN && ((PUCHAR)buf)[0] == 0x12
+            && ctx->ProductId == MM_PID_V3)
         {
-            WdfSpinLockAcquire(ctx->Lock);
-            ULONG cnt = ++ctx->Rid27Count;
-
-            // Ring buffer: store up to RID27_BYTES_PER_SLOT bytes of this report.
-            ULONG slot = ctx->Rid27RingNext % RID27_RING_SLOTS;
-            ctx->Rid27RingNext++;
-            ULONG copyLen = (ULONG)((bytesRead < RID27_BYTES_PER_SLOT)
-                                    ? bytesRead : RID27_BYTES_PER_SLOT);
-            RtlCopyMemory(ctx->Rid27Ring[slot], p, copyLen);
-            if (copyLen < RID27_BYTES_PER_SLOT)
-                RtlZeroMemory(ctx->Rid27Ring[slot] + copyLen,
-                              RID27_BYTES_PER_SLOT - copyLen);
-
-            WdfSpinLockRelease(ctx->Lock);
-
-            // Log first 20 reports, then every 64th.
-            BOOLEAN doLog = (cnt <= 20) || ((cnt & 63) == 0);
-            if (doLog)
+            UCHAR  translated[5];
+            ULONG  translatedLen = sizeof(translated);
+            NTSTATUS ts = TranslateMouse2ToHid(
+                (PUCHAR)buf, bytesRead, translated, &translatedLen, ctx);
+            if (NT_SUCCESS(ts) && translatedLen > 0)
             {
-                WdfSpinLockAcquire(ctx->Lock);
-                ctx->Rid27LoggedCount++;
-                WdfSpinLockRelease(ctx->Lock);
-
-                // Safe zero-extend for bytes beyond actual report length.
-#define B(i) ((ULONG)((bytesRead > (i)) ? p[(i)] : 0))
-                DbgPrint("M14[RID27.%lu] len=%lu "
-                         "b[0..15]:  %02X %02X %02X %02X %02X %02X %02X %02X "
-                         "%02X %02X %02X %02X %02X %02X %02X %02X\n",
-                         cnt, (ULONG)bytesRead,
-                         B(0),B(1),B(2),B(3),B(4),B(5),B(6),B(7),
-                         B(8),B(9),B(10),B(11),B(12),B(13),B(14),B(15));
-                DbgPrint("M14[RID27.%lu] b[16..31]: %02X %02X %02X %02X %02X %02X %02X %02X "
-                         "%02X %02X %02X %02X %02X %02X %02X %02X\n",
-                         cnt,
-                         B(16),B(17),B(18),B(19),B(20),B(21),B(22),B(23),
-                         B(24),B(25),B(26),B(27),B(28),B(29),B(30),B(31));
-                DbgPrint("M14[RID27.%lu] b[32..47]: %02X %02X %02X %02X %02X %02X %02X %02X "
-                         "%02X %02X %02X %02X %02X %02X %02X %02X\n",
-                         cnt,
-                         B(32),B(33),B(34),B(35),B(36),B(37),B(38),B(39),
-                         B(40),B(41),B(42),B(43),B(44),B(45),B(46),B(47));
-#undef B
+                RtlCopyMemory(buf, translated, translatedLen);
+                // CRITICAL: update returned byte count (missing = heap corruption)
+                WdfRequestSetInformation(Request, translatedLen);
             }
         }
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER)
+    {
+        DbgPrint("M14: OnReadComplete — buffer access exception, passing through\n");
     }
 
     WdfRequestComplete(Request, status);
@@ -376,6 +429,19 @@ OnSdpQueryComplete(_In_ WDFREQUEST Request, _In_ WDFIOTARGET Target,
     if (snapLen < 64) RtlZeroMemory(ctx->LastSdpBytes + snapLen, 64 - snapLen);
     WdfSpinLockRelease(ctx->Lock);
 
+    // v1 pass-through guard: only inject Descriptor C for v3 (PID 0x0323).
+    // v1 (PIDs 0x030D / 0x0310) has a native HID descriptor with RID=0x47 for
+    // battery; overwriting it with Descriptor C would break v1 battery permanently.
+    // ProductId == 0 means we could not read the PID — allow injection (safe
+    // fallback: preserves behaviour for unknown devices, same as before this guard).
+    if (ctx->ProductId != 0 && ctx->ProductId != MM_PID_V3)
+    {
+        DbgPrint("M13: OnSdpQueryComplete — PID=0x%04X is not v3 (0x%04X), pass-through (no injection)\n",
+                 ctx->ProductId, (USHORT)MM_PID_V3);
+        WdfRequestComplete(Request, status);
+        return;
+    }
+
     // Attempt descriptor rewrite.
     ULONG    newLen      = (ULONG)sdpLen;
     NTSTATUS patchStatus = SdpRewrite_Process((PUCHAR)buf, (ULONG)sdpLen, &newLen);
@@ -418,8 +484,9 @@ OnSdpQueryComplete(_In_ WDFREQUEST Request, _In_ WDFIOTARGET Target,
 //   LastPatchStatusHex   REG_DWORD  — NTSTATUS of last patch attempt
 //   LastSdpBytes         REG_BINARY — first 64 bytes of last SDP buffer
 //   HidReadCount         REG_DWORD  — M14: total IRP_MJ_READ completions
-//   Rid27Count           REG_DWORD  — M14: completions where buf[0]==0x27
-//   Rid27LoggedCount     REG_DWORD  — M14: RID=0x27 reports sent to DbgPrint
+//   Rid12Count           REG_DWORD  — M14c: completions where buf[0]==0x12 (MOUSE2)
+//   Rid27Count           REG_DWORD  — legacy: completions where buf[0]==0x27
+//   Rid27LoggedCount     REG_DWORD  — legacy: RID=0x27 reports sent to DbgPrint
 // --------------------------------------------------------------------------
 
 VOID M13_DiagTimerFunc(_In_ WDFTIMER Timer)
@@ -438,7 +505,7 @@ VOID M13_DiagWorkItemFunc(_In_ WDFWORKITEM WorkItem)
 
     // Snapshot under lock, then write registry at PASSIVE_LEVEL unlocked.
     ULONG ictlCount, scanHits, patchOk, lastSize, lastStatus;
-    ULONG hidReads, rid27Count, rid27Logged, rid27SlotsFilled;
+    ULONG hidReads, rid12Count, rid27Count, rid27Logged, rid27SlotsFilled;
     UCHAR lastBytes[64];
     UCHAR rid27Snapshot[RID27_RING_SLOTS * RID27_BYTES_PER_SLOT];
     WdfSpinLockAcquire(ctx->Lock);
@@ -448,6 +515,7 @@ VOID M13_DiagWorkItemFunc(_In_ WDFWORKITEM WorkItem)
     lastSize      = ctx->LastSdpBufSize;
     lastStatus    = ctx->LastPatchStatus;
     hidReads      = ctx->HidReadCount;
+    rid12Count    = ctx->Rid12Count;
     rid27Count    = ctx->Rid27Count;
     rid27Logged   = ctx->Rid27LoggedCount;
     rid27SlotsFilled = (rid27Count < RID27_RING_SLOTS) ? rid27Count : RID27_RING_SLOTS;
@@ -479,6 +547,7 @@ VOID M13_DiagWorkItemFunc(_In_ WDFWORKITEM WorkItem)
     SET_DWORD(L"LastSdpBufSize",      lastSize);
     SET_DWORD(L"LastPatchStatusHex",  lastStatus);
     SET_DWORD(L"HidReadCount",        hidReads);
+    SET_DWORD(L"Rid12Count",          rid12Count);
     SET_DWORD(L"Rid27Count",          rid27Count);
     SET_DWORD(L"Rid27LoggedCount",    rid27Logged);
     SET_DWORD(L"Rid27SlotsFilled",    rid27SlotsFilled);
