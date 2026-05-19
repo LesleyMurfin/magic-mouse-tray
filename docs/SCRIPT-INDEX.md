@@ -223,6 +223,11 @@ Phases: (lines 86-700+ in runner)
 
 Runner also supports legacy phases for M12 mouse driver (BUILD→mm-dev.ps1, direct runner phases).
 
+| `scripts/build-driver.ps1` | Standalone M13 KMDF driver build. Queue: `BUILD\|<nonce>\|Release\|x64` |
+| `scripts/sign-driver.ps1`  | Sign .sys + .cat with PFX. Queue: `SIGN\|<nonce>\|<sys>\|<cat>\|<pfx>` |
+| `scripts/install-driver.ps1` | pnputil /add-driver + /install. Queue: `INSTALL-DRIVER\|<nonce>\|<inf>` |
+| Queue: `STARTUP-REPAIR\|<nonce>` | Calls `startup-repair.ps1` to set LowerFilters + restart-device |
+
 ---
 
 ## Cross-Location References
@@ -298,3 +303,4 @@ File: `/home/lesley/projects/Personal/magic-mouse-tray/scripts/mm-task-runner.ps
 |------|--------|
 | 2026-05-09 | Created canonical SCRIPT-INDEX.md: audited 63 scripts across 6 locations (refactored, dated, mouse PATH-A, keyboard driver, runner, ETW). Consolidated cross-references, identified 23 throwaway candidates, flagged runner hardcoded paths for update. Index extends refactored/README.md with full landscape view. |
 | 2026-05-18 | Synced 17 canonical kbd-*.ps1 + postpatch-*.ps1 + mse-dump-v3-sdp.ps1 from D:\mm3-driver\scripts\ into scripts/. Renamed 25 session probe scripts: stripped date suffixes (2026-05-07/08), no content edits. Added Keyboard Battery (PATH-C) section. Updated runner cross-reference status. PRD-185 / branch ai/magic-mouse-complete-fix. |
+| 2026-05-18 | Track 0: added STARTUP-REPAIR phase to mm-task-runner.ps1; extracted scripts/build-driver.ps1, scripts/sign-driver.ps1, scripts/install-driver.ps1 as standalone M13 build/sign/install scripts. PRD-200 Phase B / branch ai/mm-t0-scripts. |

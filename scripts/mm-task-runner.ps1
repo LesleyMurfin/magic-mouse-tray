@@ -855,6 +855,38 @@ try {
             $rc = 99
         }
         Log "PATHA-V5-UNINSTALL exited $rc; log at $unLog"
+    # STARTUP-REPAIR: run startup-repair.ps1 to set LowerFilters and restart-device for
+    # all known Apple Magic Mouse PIDs. Required after driver install to bind WDF filter.
+    # Format: STARTUP-REPAIR|<nonce>
+    elseif ($phase -eq 'STARTUP-REPAIR') {
+        $srLog = Join-Path $QueueDir "startup-repair-$nonce.log"
+        $srScript = $null
+        $srCandidates = @(
+            '\\wsl.localhost\Ubuntu\home\lesley\projects\magic-mouse-tray\startup-repair.ps1',
+            'D:\mm3-driver\startup-repair.ps1',
+            'C:\mm3-pkg\startup-repair.ps1'
+        )
+        foreach ($c in $srCandidates) {
+            if (Test-Path $c) { $srScript = $c; break }
+        }
+        if (-not $srScript) {
+            "ERROR: startup-repair.ps1 not found in any candidate path" | Set-Content $srLog -Encoding ASCII
+            Log "STARTUP-REPAIR: script not found"
+            $rc = 127
+        } else {
+            try {
+                "=== STARTUP-REPAIR: $srScript ===" | Set-Content $srLog -Encoding ASCII
+                & powershell.exe -ExecutionPolicy Bypass -File $srScript -LogFile (Join-Path $QueueDir "startup-repair-detail-$nonce.log") 2>&1 |
+                    Add-Content $srLog -Encoding ASCII
+                $rc = $LASTEXITCODE
+                if ($null -eq $rc) { $rc = 0 }
+            } catch {
+                "Exception: $_" | Add-Content $srLog -Encoding ASCII
+                Log "Exception in STARTUP-REPAIR: $_"
+                $rc = 99
+            }
+        }
+        Log "STARTUP-REPAIR exited $rc; log at $srLog"
     } else {
         # Default: route to mm-dev.ps1 -Phase $phase
         $candidates = @(
