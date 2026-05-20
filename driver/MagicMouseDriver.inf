@@ -32,7 +32,7 @@ ClassGUID   = {745A17A0-74D3-11D0-B6FE-00A0C90F57DA}
 Provider    = %ManufacturerName%
 DriverPackageDisplayName = %DeviceDesc%
 DriverPackageType = PlugAndPlay
-DriverVer   = 05/18/2026,2.0.0.0
+DriverVer   = 05/20/2026,2.0.2.0
 CatalogFile = MagicMouseDriver.cat
 PnpLockdown = 1
 

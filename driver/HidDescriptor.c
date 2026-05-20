@@ -111,10 +111,8 @@ const UCHAR g_HidDescriptor[] = {
     0x81, 0x06,             //   Input (Data, Variable, Relative)   — 46 bytes
 
     // ---- 19-byte vendor Feature padding — keeps descriptor at 135 bytes ----
-    // RID=0x67 (unused by any real report). Feature (Constant) is inert:
-    // HidClass will not surface it to applications without explicit opt-in.
-    // hidparse accepts all items here; tag=0 (0x00) bytes are illegal and
-    // must NOT be used — they trigger STATUS_ILLEGAL_INSTRUCTION (see above).
+    // RID=0x67, unused by any real report. Feature (Constant) is inert.
+    // Tag 0 (0x00) bytes are illegal — hidparse.sys returns STATUS_ILLEGAL_INSTRUCTION.
     0x06, 0x00, 0xFF,       //   Usage Page (Vendor 0xFF00)
     0x09, 0x01,             //   Usage (0x01)
     0x09, 0x02,             //   Usage (0x02)
@@ -123,7 +121,7 @@ const UCHAR g_HidDescriptor[] = {
     0x25, 0xFF,             //   Logical Maximum (255)
     0x95, 0x07,             //   Report Count (7)
     0x75, 0x08,             //   Report Size (8)
-    0xB1, 0x03,             //   Feature (Constant)   — 7 bytes, 19 items total
+    0xB1, 0x03,             //   Feature (Constant)
 
     0xC0,                   // End Collection (Application)
 };
