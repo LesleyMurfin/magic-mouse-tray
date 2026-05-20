@@ -18,14 +18,12 @@
 //   RID=0x47  Feature, 1 byte — Battery Strength 0-100 (GDC page 0x06)
 //   RID=0x27  Input,  46 bytes — Touch/gesture data (GDC page 0x06)
 //
-// Size: 116 bytes. No padding. PatchSdpHidDescriptor handles the delta=-19
-// case (shrink from native 135 bytes) by shifting tail bytes and updating
-// all four SDP length fields: TEXT_STRING, inner/outer SEQUENCE, and the
-// top-level AttributeLists sequence at buf[8] (after the 8-byte
-// BTH_SDP_STREAM_RESPONSE header). responseSize at buf[4..7] is also updated.
+// Size: 135 bytes (116 valid + 19 vendor Feature padding). Padding keeps the
+// descriptor at the native SDP size so PatchSdpHidDescriptor runs as a
+// delta=0 in-place swap — no SDP sequence length fields need updating.
 //
-// NOTE: do NOT pad with zero bytes. hidparse.sys explicitly returns
-// STATUS_ILLEGAL_INSTRUCTION for short items with Main type tag 0 (0x00 byte)
+// NOTE: do NOT pad with 0x00 bytes. hidparse.sys explicitly returns
+// STATUS_ILLEGAL_INSTRUCTION for HID short items with Main type tag 0 (0x00)
 // — those are reserved/undefined in the HID spec and hidparse treats them
 // as illegal. Any padding must use syntactically valid HID items.
 
@@ -111,6 +109,21 @@ const UCHAR g_HidDescriptor[] = {
     0x75, 0x08,             //   Report Size (8)
     0x95, 0x2E,             //   Report Count (46)
     0x81, 0x06,             //   Input (Data, Variable, Relative)   — 46 bytes
+
+    // ---- 19-byte vendor Feature padding — keeps descriptor at 135 bytes ----
+    // RID=0x67 (unused by any real report). Feature (Constant) is inert:
+    // HidClass will not surface it to applications without explicit opt-in.
+    // hidparse accepts all items here; tag=0 (0x00) bytes are illegal and
+    // must NOT be used — they trigger STATUS_ILLEGAL_INSTRUCTION (see above).
+    0x06, 0x00, 0xFF,       //   Usage Page (Vendor 0xFF00)
+    0x09, 0x01,             //   Usage (0x01)
+    0x09, 0x02,             //   Usage (0x02)
+    0x85, 0x67,             //   Report ID (0x67)
+    0x15, 0x00,             //   Logical Minimum (0)
+    0x25, 0xFF,             //   Logical Maximum (255)
+    0x95, 0x07,             //   Report Count (7)
+    0x75, 0x08,             //   Report Size (8)
+    0xB1, 0x03,             //   Feature (Constant)   — 7 bytes, 19 items total
 
     0xC0,                   // End Collection (Application)
 };
