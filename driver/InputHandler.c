@@ -176,26 +176,52 @@ PatchSdpHidDescriptor(
     buf[descOffset - 5] = (UCHAR)innerPayload;  // inner SEQUENCE len
     buf[descOffset - 7] = (UCHAR)outerPayload;  // outer SEQUENCE len
 
-    // Fix the top-level AttributeLists sequence that wraps the entire response.
-    // The SDP ServiceAttributeResponse AttributeLists parameter is itself a
-    // sequence data element starting at buf[0].
+    // Fix the top-level AttributeLists sequence and the BTH_SDP_STREAM_RESPONSE
+    // header when the descriptor size changes.
+    //
+    // buf[0..7] = BTH_SDP_STREAM_RESPONSE header (two ULONGs: requiredSize,
+    // responseSize).  buf[8] is the first byte of the raw SDP AttributeLists
+    // data element — that is where the top-level sequence tag lives.
+    //
+    // Previous code checked buf[0] for 0x35/0x36, but buf[0] is always 0x09
+    // (the low byte of requiredSize).  That branch never fired.  Fixed below.
     LONG delta = (LONG)newDescLen - (LONG)descLen;  // negative when shrinking
-    if (bufSize >= 2 && buf[0] == SDP_SEQ_1B)
+    if (delta != 0 && bufSize >= 11 && buf[8] == SDP_SEQ_1B)
     {
-        // 0x35 NN — 1-byte length
-        LONG newTop = (LONG)(UCHAR)buf[1] + delta;
+        // buf[8]=0x35, buf[9]=NN — 1-byte payload length
+        LONG newTop = (LONG)(UCHAR)buf[9] + delta;
         if (newTop >= 0 && newTop <= 0xFF)
-            buf[1] = (UCHAR)newTop;
+            buf[9] = (UCHAR)newTop;
+
+        // Update BTH_SDP_STREAM_RESPONSE.responseSize (buf[4..7], little-endian)
+        ULONG respSize;
+        RtlCopyMemory(&respSize, buf + 4, sizeof(ULONG));
+        LONG newResp = (LONG)respSize + delta;
+        if (newResp > 0)
+        {
+            respSize = (ULONG)newResp;
+            RtlCopyMemory(buf + 4, &respSize, sizeof(ULONG));
+        }
     }
-    else if (bufSize >= 3 && buf[0] == SDP_SEQ_2B)
+    else if (delta != 0 && bufSize >= 12 && buf[8] == SDP_SEQ_2B)
     {
-        // 0x36 HH LL — 2-byte big-endian length
-        USHORT top    = ((USHORT)buf[1] << 8) | (USHORT)buf[2];
+        // buf[8]=0x36, buf[9..10]=HH LL — 2-byte big-endian payload length
+        USHORT top    = ((USHORT)buf[9] << 8) | (USHORT)buf[10];
         LONG   newTop = (LONG)top + delta;
         if (newTop >= 0 && newTop <= 0xFFFF)
         {
-            buf[1] = (UCHAR)((USHORT)newTop >> 8);
-            buf[2] = (UCHAR)((USHORT)newTop & 0xFF);
+            buf[9]  = (UCHAR)((USHORT)newTop >> 8);
+            buf[10] = (UCHAR)((USHORT)newTop & 0xFF);
+        }
+
+        // Update BTH_SDP_STREAM_RESPONSE.responseSize (buf[4..7], little-endian)
+        ULONG respSize;
+        RtlCopyMemory(&respSize, buf + 4, sizeof(ULONG));
+        LONG newResp = (LONG)respSize + delta;
+        if (newResp > 0)
+        {
+            respSize = (ULONG)newResp;
+            RtlCopyMemory(buf + 4, &respSize, sizeof(ULONG));
         }
     }
 

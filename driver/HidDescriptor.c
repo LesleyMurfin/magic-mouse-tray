@@ -18,20 +18,16 @@
 //   RID=0x47  Feature, 1 byte — Battery Strength 0-100 (GDC page 0x06)
 //   RID=0x27  Input,  46 bytes — Touch/gesture data (GDC page 0x06)
 //
-// Size: Apple's descriptor is 116 bytes. Padded to 135 bytes with reserved
-// zero short items (HID spec §6.2.2.4: size specifier 0 = 0 bytes, tag 0 =
-// reserved, safely ignored by all HID parsers). This matches the native
-// Magic Mouse 2024 SDP HIDDescriptorList descriptor size exactly, so
-// PatchSdpHidDescriptor operates as an in-place swap (delta=0) — no SDP
-// sequence length fields need updating.
+// Size: 116 bytes. No padding. PatchSdpHidDescriptor handles the delta=-19
+// case (shrink from native 135 bytes) by shifting tail bytes and updating
+// all four SDP length fields: TEXT_STRING, inner/outer SEQUENCE, and the
+// top-level AttributeLists sequence at buf[8] (after the 8-byte
+// BTH_SDP_STREAM_RESPONSE header). responseSize at buf[4..7] is also updated.
 //
-// Why 135 bytes (native size):
-//   The SDP output buffer contains a Windows BTH_SDP_STREAM_RESPONSE header
-//   (8 bytes: requiredSize + responseSize as two LE ULONGs) before the raw
-//   SDP data. PatchSdpHidDescriptor's top-level length fix checks buf[0] for
-//   0x35/0x36, but buf[0] is the first byte of the Windows header (0x09),
-//   not the SDP sequence header (which is at buf[8]). With delta=0 (same
-//   size swap) this fix is never needed — no SDP length fields change.
+// NOTE: do NOT pad with zero bytes. hidparse.sys explicitly returns
+// STATUS_ILLEGAL_INSTRUCTION for short items with Main type tag 0 (0x00 byte)
+// — those are reserved/undefined in the HID spec and hidparse treats them
+// as illegal. Any padding must use syntactically valid HID items.
 
 #include "HidDescriptor.h"
 
@@ -117,13 +113,6 @@ const UCHAR g_HidDescriptor[] = {
     0x81, 0x06,             //   Input (Data, Variable, Relative)   — 46 bytes
 
     0xC0,                   // End Collection (Application)
-
-    // ---- 19-byte padding to reach 135 bytes (native SDP descriptor size) ----
-    // HID spec §6.2.2.4: size specifier 0 = 0 data bytes, type/tag 0 = reserved.
-    // All compliant HID parsers (HidBth, mouhid, hid.sys) ignore these items.
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00,
 };
 
 const ULONG g_HidDescriptorSize = sizeof(g_HidDescriptor);
