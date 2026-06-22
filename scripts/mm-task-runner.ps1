@@ -856,6 +856,44 @@ try {
         }
         Log "PATHA-V5-UNINSTALL exited $rc; log at $unLog"
     }
+    # ORCA-WIN-BUILD: build the Orca Windows client (electron-builder) under the
+    # elevated task token, which DOES hold SeCreateSymbolicLinkPrivilege so the
+    # winCodeSign bundle (containing darwin .dylib symlinks) extracts cleanly.
+    # WSL interop tokens lack that privilege, which is why the build must run here.
+    # Format: ORCA-WIN-BUILD|<nonce>
+    elseif ($phase -eq 'ORCA-WIN-BUILD') {
+        $ocLog = Join-Path $QueueDir "orca-build-$nonce.log"
+        $ocDir = 'C:\Users\Lesley\projects\orca'
+        try {
+            "=== ORCA-WIN-BUILD start $(Get-Date) dir=$ocDir ===" | Set-Content $ocLog -Encoding ASCII
+            "token: $(whoami)" | Add-Content $ocLog -Encoding ASCII
+            ((whoami /priv 2>&1 | Select-String 'SymbolicLink') -join "`n") | Add-Content $ocLog -Encoding ASCII
+            $npmDir  = 'C:\Users\Lesley\AppData\Roaming\npm'
+            $nodeDir = 'C:\Program Files\nodejs'
+            $env:Path = "$nodeDir;$npmDir;$env:Path"
+            $env:CSC_IDENTITY_AUTO_DISCOVERY = 'false'
+            if (-not (Test-Path $ocDir)) { throw "Orca dir not found: $ocDir" }
+            Push-Location $ocDir
+            & "$npmDir\pnpm.cmd" run build:win 2>&1 | Add-Content $ocLog -Encoding ASCII
+            $rc = $LASTEXITCODE
+            if ($null -eq $rc) { $rc = 0 }
+            Pop-Location
+            "=== build:win exit $rc ===" | Add-Content $ocLog -Encoding ASCII
+            $exe = Get-ChildItem "$ocDir\dist\*.exe" -EA SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($exe) {
+                "ARTIFACT: $($exe.FullName) ($([math]::Round($exe.Length/1MB,1)) MB)" | Add-Content $ocLog -Encoding ASCII
+                $rc = 0
+            } else {
+                "NO EXE PRODUCED" | Add-Content $ocLog -Encoding ASCII
+                if ($rc -eq 0) { $rc = 1 }
+            }
+        } catch {
+            "Exception: $_" | Add-Content $ocLog -Encoding ASCII
+            Log "Exception in ORCA-WIN-BUILD: $_"
+            $rc = 99
+        }
+        Log "ORCA-WIN-BUILD exited $rc; log at $ocLog"
+    }
     # STARTUP-REPAIR: run startup-repair.ps1 to set LowerFilters and restart-device for
     # all known Apple Magic Mouse PIDs. Required after driver install to bind WDF filter.
     # Format: STARTUP-REPAIR|<nonce>
@@ -973,7 +1011,6 @@ try {
         Log "REINSTALL-SPRINT exited $rc; log at $rsLog"
 
     # COLLECT-FORENSICS: run existing collect-forensics.ps1 + mm-pnp-eventlog.ps1
-    # Saves full forensics bundle to C:\mm-dev-queue\forensics-<timestamp>\
     } elseif ($phase -eq 'COLLECT-FORENSICS') {
         $cfLog    = Join-Path $QueueDir "collect-forensics-$nonce.log"
         $cfScript = 'D:\mm3-driver\scripts\collect-forensics.ps1'
@@ -989,7 +1026,6 @@ try {
                     Add-Content $cfLog -Encoding ASCII
                 $rc = $LASTEXITCODE
                 if ($null -eq $rc) { $rc = 0 }
-                # Also run PnP event log if accessible
                 if (Test-Path $pnpScript) {
                     "=== PNP-EVENTLOG: $pnpScript ===" | Add-Content $cfLog -Encoding ASCII
                     & powershell.exe -ExecutionPolicy Bypass -File $pnpScript -OutDir $cfOutDir 2>&1 |
@@ -1002,6 +1038,76 @@ try {
             }
         }
         Log "COLLECT-FORENSICS exited $rc; bundle at $cfOutDir"
+
+    # CAPTURE-STATE:<label> — snapshot device state before/after reboot
+    } elseif ($phase -like 'CAPTURE-STATE:*') {
+        $csLabel  = $phase.Substring('CAPTURE-STATE:'.Length)
+        $csScript = '\\wsl.localhost\Ubuntu\home\lesley\projects\magic-mouse-tray-sprint\scripts\capture-state.ps1'
+        $csOutDir = 'C:\mm-dev-queue\state-captures'
+        $csLog    = Join-Path $QueueDir "capture-state-$nonce.log"
+        New-Item -ItemType Directory -Path $csOutDir -Force -ErrorAction SilentlyContinue | Out-Null
+        if (-not (Test-Path $csScript)) {
+            "ERROR: capture-state.ps1 not found at $csScript" | Set-Content $csLog -Encoding ASCII
+            $rc = 127
+        } else {
+            try {
+                & powershell.exe -ExecutionPolicy Bypass -File $csScript -Label $csLabel -OutputDir $csOutDir 2>&1 |
+                    Set-Content $csLog -Encoding ASCII
+                $rc = $LASTEXITCODE
+                if ($null -eq $rc) { $rc = 0 }
+            } catch {
+                "Exception: $_" | Set-Content $csLog -Encoding ASCII
+                $rc = 99
+            }
+        }
+        Log "CAPTURE-STATE:$csLabel exited $rc; output in $csOutDir"
+
+    } elseif ($phase -eq 'USBLIST' -or $phase -like 'FLASH:*' -or $phase -like 'SEED:*') {
+        # Ubuntu USB flashing (PRD-202). Routes to the flash worker in the smart-home
+        # repo (reachable via WSL UNC, like CAPTURE-STATE above). The worker refuses any
+        # disk that is not USB AND < 16 GB, protecting the 2 TB backup + system disks.
+        $flashScript = '\\wsl.localhost\Ubuntu\home\lesley\projects\smart-home-automation\scripts\flash-ubuntu-runner.ps1'
+        $flashLog    = Join-Path $QueueDir "flash-$nonce.log"
+        if (-not (Test-Path $flashScript)) {
+            "ERROR: flash-ubuntu-runner.ps1 not found at $flashScript" | Set-Content $flashLog -Encoding ASCII
+            $rc = 127
+        } else {
+            try {
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $flashScript -Spec $phase -LogPath $flashLog 2>&1 |
+                    Add-Content $flashLog -Encoding ASCII
+                $rc = $LASTEXITCODE
+                if ($null -eq $rc) { $rc = 0 }
+            } catch {
+                "Exception running flash-ubuntu-runner.ps1: $_" | Add-Content $flashLog -Encoding ASCII
+                $rc = 99
+            }
+        }
+        Log "Flash phase '$phase' exited $rc; log at $flashLog"
+
+    # Special phase prefix "HIDPAYLOAD:*" routes to mm-test-A4-hidpayload-capture.ps1
+    } elseif ($phase -like 'HIDPAYLOAD:*') {
+        $a4Script = 'D:\mm3-driver\scripts\mm-test-A4-hidpayload-capture.ps1'
+        if (-not (Test-Path $a4Script)) {
+            Log "ERROR: mm-test-A4-hidpayload-capture.ps1 not found at $a4Script"
+            "127|$nonce" | Set-Content $ResFile -Encoding ASCII
+            exit 127
+        }
+        $extraArg = ($phase -split ':', 2)[1]
+        Log "Using $a4Script arg='$extraArg'"
+        try {
+            if ($extraArg -like 'ETL:*') {
+                $etlPath = ($extraArg -split ':', 2)[1]
+                & $a4Script -ExistingEtl $etlPath
+            } else {
+                & $a4Script
+            }
+            $rc = $LASTEXITCODE
+            if ($null -eq $rc) { $rc = 0 }
+        } catch {
+            Log "Exception running mm-test-A4-hidpayload-capture.ps1: $_"
+            $rc = 99
+        }
+        Log "HIDPAYLOAD exited $rc"
 
     } else {
         # Default: route to mm-dev.ps1 -Phase $phase
