@@ -60,10 +60,14 @@ internal sealed class TrayApp : IDisposable
 
         _poller = new AdaptivePoller(_config);
         _poller.BatteryChanged += OnBatteryChanged;
-        _poller.Start();
 
         _recycleManager = new V3RecycleManager(_config);
         _recycleManager.BatteryRead += OnBatteryChanged;
+
+        // Start polling only after every field OnBatteryChanged touches (_recycleManager,
+        // _poller) is assigned — the first poll cycle can raise BatteryChanged, and
+        // OnBatteryChanged dereferences _recycleManager in UpdateTrayIcon.
+        _poller.Start();
     }
 
     ContextMenuStrip BuildMenu(
