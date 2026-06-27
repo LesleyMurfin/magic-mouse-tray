@@ -33,3 +33,9 @@ $tmp/
 # (lines 37-38 of check-style.sh write these to repo root)
 style-report.md
 style-results.json
+
+# Agent session scratch -- handoff/fix notes, not product code
+.run/
+
+# Serena tooling local config
+.serena/
