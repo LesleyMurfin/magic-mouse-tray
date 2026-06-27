@@ -51,6 +51,10 @@ internal sealed class AdaptivePoller : IDisposable
         }
     }
 
+    // Ranks a battery reading when collapsing a device's multiple HID collections to one:
+    // a real percentage (0-100) beats -2 (present but unreadable) beats -1 (not found).
+    static int ReadingRank(int pct) => pct >= 0 ? pct + 2 : (pct == -2 ? 1 : 0);
+
     internal void Start() => _pollTask = PollLoop(_cts.Token);
 
     // Cancels the current wait and polls immediately. Safe to call from any thread.
@@ -97,20 +101,32 @@ internal sealed class AdaptivePoller : IDisposable
                 }
                 else
                 {
-                    foreach (var device in devices)
+                    // One physical device can expose several HID collections (the v3 Magic Mouse
+                    // surfaces a unified path, Col01 pointer, and Col02 vendor battery — all the same
+                    // DisplayName). Discover returns one device per path, so raising BatteryChanged
+                    // per path lets a non-battery collection's -1/-2 clobber the good Col02 reading
+                    // (last write wins in TrayApp's per-name dictionary). Collapse to the best read
+                    // per device name: a real percentage beats -2 (present, unreadable) beats -1.
+                    foreach (var group in devices.GroupBy(d => d.DeviceName, StringComparer.OrdinalIgnoreCase))
                     {
-                        int pct = ReadBatteryGuarded(device, DeviceReadTimeout);
-                        BatteryChanged?.Invoke(pct, device.DeviceName);
+                        int best = -1;
+                        foreach (var device in group)
+                        {
+                            int pct = ReadBatteryGuarded(device, DeviceReadTimeout);
+                            if (ReadingRank(pct) > ReadingRank(best)) best = pct;
+                        }
 
-                        if (pct >= 0)
+                        BatteryChanged?.Invoke(best, group.Key);
+
+                        if (best >= 0)
                         {
                             // Record into drain tracker (skip v3 Mode-B -2 and -1 failures)
-                            DrainRateTracker.Record(device.DeviceName, pct);
+                            DrainRateTracker.Record(group.Key, best);
 
-                            if (lowestPct < 0 || pct < lowestPct)
+                            if (lowestPct < 0 || best < lowestPct)
                             {
-                                lowestPct = pct;
-                                lowestDevice = device.DeviceName;
+                                lowestPct = best;
+                                lowestDevice = group.Key;
                             }
                         }
                     }
@@ -129,8 +145,7 @@ internal sealed class AdaptivePoller : IDisposable
             catch (Exception ex)
             {
                 var root = ex.GetBaseException();
-                var frame = root.StackTrace?.Replace("\r", " ").Replace("\n", " ");
-                Logger.Log($"POLL_CYCLE_ERROR type={root.GetType().Name} err={root.Message} at={frame}");
+                Logger.Log($"POLL_CYCLE_ERROR type={root.GetType().Name} err={root.Message}");
             }
 
             try { await Task.Delay(interval, ct); }
