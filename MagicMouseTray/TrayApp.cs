@@ -32,7 +32,8 @@ internal sealed class TrayApp : IDisposable
     // Persistent critical alert shown at 1%; auto-closed when mouse unplugs.
     CriticalAlert? _criticalAlert;
 
-    readonly DriverStatus _driverStatus;
+    // Not readonly: recomputed on menu Opening so a just-applied driver fix shows without restart.
+    DriverStatus _driverStatus;
     readonly V3RecycleManager _recycleManager;
 
     Icon? _currentIcon;
@@ -75,6 +76,10 @@ internal sealed class TrayApp : IDisposable
         out ToolStripMenuItem startupItem)
     {
         var menu = new ContextMenuStrip();
+
+        // Recompute driver status + rebuild the matrix on every open so a just-applied
+        // driver fix shows without restart. GetStatus() is registry-only and fast.
+        menu.Opening += (_, _) => { _driverStatus = DriverHealthChecker.GetStatus(); UpdateDeviceMenuItems(); };
 
         // --- Device battery status (dynamically updated) ---
         _deviceSection = new ToolStripMenuItem("Devices") { Enabled = false };
@@ -152,29 +157,31 @@ internal sealed class TrayApp : IDisposable
         refresh.Click += (_, _) => _poller.RefreshNow();
         menu.Items.Add(refresh);
 
+        // --- Diagnostics (debug surface). The v3 "Read Battery Now" action is also
+        //     surfaced contextually in the per-device matrix dropdown. ---
+        var diagnostics = new ToolStripMenuItem("Diagnostics");
+
         var readNow = new ToolStripMenuItem("Read Battery Now");
         readNow.Click += (_, _) => _ = _recycleManager.ForceReadNowAsync();
-        menu.Items.Add(readNow);
+        diagnostics.DropDownItems.Add(readNow);
 
-        // --- Test Notification (debug only) ---
         var testToast = new ToolStripMenuItem("Test Notification");
         testToast.Click += (_, _) =>
         {
             var (name, pct) = _deviceBatteries.FirstOrDefault(kv => kv.Value >= 0);
             ToastNotifier.Show(pct >= 0 ? pct : 15, name?.Length > 0 ? name : "Magic Mouse");
         };
-        menu.Items.Add(testToast);
+        diagnostics.DropDownItems.Add(testToast);
 
-        menu.Items.Add(new ToolStripSeparator());
-
-        // --- Diagnostics ---
         var openLogs = new ToolStripMenuItem("Open Logs");
         openLogs.Click += (_, _) => OpenLogsInEditor();
-        menu.Items.Add(openLogs);
+        diagnostics.DropDownItems.Add(openLogs);
 
         var openDiagFolder = new ToolStripMenuItem("Open Diagnostics Folder");
         openDiagFolder.Click += (_, _) => OpenDiagnosticsFolder();
-        menu.Items.Add(openDiagFolder);
+        diagnostics.DropDownItems.Add(openDiagFolder);
+
+        menu.Items.Add(diagnostics);
 
         menu.Items.Add(new ToolStripSeparator());
 
@@ -372,8 +379,22 @@ internal sealed class TrayApp : IDisposable
         if (_deviceBatteries.Count == 0)
         {
             _deviceSection.Text = "No devices detected";
+            // Empty-state guidance (non-clickable child hint).
+            _deviceSection.Enabled = true; // enable so the hint dropdown is reachable
+            _deviceSection.DropDownItems.Clear();
+            _deviceSection.DropDownItems.Add(new ToolStripMenuItem(
+                "Pair a Magic Mouse/Keyboard via Bluetooth, then Refresh Now") { Enabled = false });
+            // Drop any stale per-device rows
+            foreach (var key in _deviceMenuItems.Keys.ToList())
+            {
+                _tray.ContextMenuStrip?.Items.Remove(_deviceMenuItems[key]);
+                _deviceMenuItems.Remove(key);
+            }
             return;
         }
+
+        _deviceSection.Enabled = false;
+        _deviceSection.DropDownItems.Clear();
 
         foreach (var kv in _deviceBatteries)
         {
@@ -389,7 +410,7 @@ internal sealed class TrayApp : IDisposable
 
             if (!_deviceMenuItems.TryGetValue(kv.Key, out var item))
             {
-                item = new ToolStripMenuItem(label) { Enabled = false };
+                item = new ToolStripMenuItem(label);   // enabled — carries the matrix dropdown
                 _deviceMenuItems[kv.Key] = item;
                 // Insert before the separator that follows the device section
                 var sepIdx = _tray.ContextMenuStrip!.Items.IndexOf(_deviceSection) + 1;
@@ -398,6 +419,34 @@ internal sealed class TrayApp : IDisposable
             else
             {
                 item.Text = label;
+            }
+
+            // Capability matrix dropdown for this device.
+            item.DropDownItems.Clear();
+            var knd = DeviceCapability.KindForName(kv.Key);
+            if (knd is { } k)
+            {
+                var row = DeviceCapability.Describe(k, kv.Value, _driverStatus);
+                item.DropDownItems.Add(new ToolStripMenuItem($"Read method: {row.ReadMethod}") { Enabled = false });
+                item.DropDownItems.Add(new ToolStripMenuItem($"Status: {row.Status}") { Enabled = false });
+                if (row.ActionLabel is { } al)
+                {
+                    var action = new ToolStripMenuItem(al) { ForeColor = System.Drawing.Color.OrangeRed };
+                    if (row.ActionUrl is { } url)
+                        action.Click += (_, _) => System.Diagnostics.Process.Start(
+                            new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+                    else // in-app action (today only v3 "Read Battery Now")
+                    {
+                        // ForceReadNowAsync runs the FLIP cycle unconditionally, so if Battery
+                        // Reads is Off or recycle auto-disabled it would no-op/RecordFailure
+                        // silently. Gate the action on the live recycle state.
+                        bool canRead = _config.EnableV3Recycle && !_recycleManager.AutoDisabled;
+                        action.Enabled = canRead;
+                        if (canRead) action.Click += (_, _) => _ = _recycleManager.ForceReadNowAsync();
+                        else action.Text = al + " (enable Battery Reads first)";
+                    }
+                    item.DropDownItems.Add(action);
+                }
             }
         }
 
