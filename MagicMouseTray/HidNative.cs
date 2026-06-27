@@ -58,6 +58,13 @@ internal static class HidNative
     internal static extern bool HidD_GetFeature(SafeFileHandle HidDeviceObject,
         byte[] ReportBuffer, int ReportBufferLength);
 
+    // B2 (experimental, flag-gated): HID++ negotiation for directly-connected third-party devices.
+    [DllImport("hid.dll", SetLastError = true)]
+    internal static extern bool HidD_GetAttributes(SafeFileHandle HidDeviceObject, ref HIDD_ATTRIBUTES Attributes);
+
+    [DllImport("hid.dll", SetLastError = true)]
+    internal static extern bool HidD_SetOutputReport(SafeFileHandle HidDeviceObject, byte[] ReportBuffer, int ReportBufferLength);
+
     [DllImport("hid.dll")]
     internal static extern bool HidD_GetPreparsedData(SafeFileHandle HidDeviceObject,
         out IntPtr PreparsedData);
@@ -342,6 +349,9 @@ internal static class HidNative
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 512)]
         public string DevicePath;
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct HIDD_ATTRIBUTES { public int Size; public ushort VendorID, ProductID, VersionNumber; }
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct HIDP_CAPS

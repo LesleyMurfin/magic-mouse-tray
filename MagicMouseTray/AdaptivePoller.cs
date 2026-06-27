@@ -90,7 +90,7 @@ internal sealed class AdaptivePoller : IDisposable
             var interval = LastInterval;
             try
             {
-                var devices = DeviceRegistry.Discover();
+                var devices = DeviceRegistry.Discover(_config.EnableThirdParty);
 
                 int lowestPct = -1;
                 string lowestDevice = string.Empty;

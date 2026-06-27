@@ -6,6 +6,10 @@ public enum DeviceKind
     MagicMouseV2,
     MagicMouseV3,
     MagicKeyboard,
+    MagicTrackpadV1,
+    MagicTrackpadV2,
+    MagicTrackpadV3,
+    LogitechMouse,
 }
 
 public interface IBatteryDevice

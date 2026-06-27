@@ -147,6 +147,20 @@ internal sealed class TrayApp : IDisposable
         };
         menu.Items.Add(battReadItem);
 
+        // --- Third-party devices toggle (B2 experimental, default off) ---
+        var thirdPartyItem = new ToolStripMenuItem(
+            _config.EnableThirdParty ? "Third-party devices [On]" : "Third-party devices [Off]")
+        {
+            Checked = _config.EnableThirdParty
+        };
+        thirdPartyItem.Click += (_, _) =>
+        {
+            _config.SetEnableThirdParty(!_config.EnableThirdParty);
+            thirdPartyItem.Text = _config.EnableThirdParty ? "Third-party devices [On]" : "Third-party devices [Off]";
+            thirdPartyItem.Checked = _config.EnableThirdParty;
+        };
+        menu.Items.Add(thirdPartyItem);
+
         // --- Refresh Now ---
         var refresh = new ToolStripMenuItem("Refresh Now");
         refresh.Click += (_, _) => _poller.RefreshNow();
