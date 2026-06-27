@@ -129,8 +129,7 @@ internal sealed class AdaptivePoller : IDisposable
             catch (Exception ex)
             {
                 var root = ex.GetBaseException();
-                var frame = root.StackTrace?.Replace("\r", " ").Replace("\n", " ");
-                Logger.Log($"POLL_CYCLE_ERROR type={root.GetType().Name} err={root.Message} at={frame}");
+                Logger.Log($"POLL_CYCLE_ERROR type={root.GetType().Name} err={root.Message}");
             }
 
             try { await Task.Delay(interval, ct); }
