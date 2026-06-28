@@ -12,7 +12,6 @@ public partial class App
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-
         // Single-instance guard: a second launch would create a competing V3RecycleManager
         // racing on C:\mm-dev-queue\request.txt. Local\ scope is correct for a per-user tray app.
         _instanceMutex = new Mutex(initiallyOwned: true, @"Local\MagicMouseTray.SingleInstance", out _ownsMutex);
@@ -23,6 +22,20 @@ public partial class App
             Shutdown();
             return;                      // second instance exits silently
         }
+
+        System.AppDomain.CurrentDomain.UnhandledException += (s, ev) =>
+        {
+            if (ev.ExceptionObject is System.Exception ex)
+                Logger.Log($"FATAL_ERROR AppDomain: {ex.Message}\n{ex.StackTrace}");
+            else
+                Logger.Log("FATAL_ERROR AppDomain: Unknown exception");
+        };
+
+        DispatcherUnhandledException += (s, ev) =>
+        {
+            Logger.Log($"ERROR Dispatcher: {ev.Exception.Message}\n{ev.Exception.StackTrace}");
+            ev.Handled = true;
+        };
 
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
         _trayApp = new TrayApp(Config.Load());
