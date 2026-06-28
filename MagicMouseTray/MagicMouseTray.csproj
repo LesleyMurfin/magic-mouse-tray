@@ -15,9 +15,11 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <!-- Allows building on non-Windows (e.g. restoring packages) -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
-    <!-- HID device enumeration and handle management -->
-    <PackageReference Include="HidLibrary" Version="3.3.40" />
+    <InternalsVisibleTo Include="MagicMouseTray.Tests" />
   </ItemGroup>
 </Project>

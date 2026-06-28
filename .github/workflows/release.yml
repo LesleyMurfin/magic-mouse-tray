@@ -1,0 +1,50 @@
+name: release
+
+# Build, test, publish, optionally sign, and attach the single-file exe on a v* tag.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore MagicMouseTray/MagicMouseTray.csproj
+
+      - name: Build
+        run: dotnet build MagicMouseTray/MagicMouseTray.csproj -c Release --no-restore
+
+      # Unit tests target net8.0-windows and require the windows-latest runner (cannot run on Linux).
+      - name: Test
+        run: dotnet test MagicMouseTray.Tests/MagicMouseTray.Tests.csproj -c Release
+
+      - name: Publish (single-file, self-contained win-x64)
+        run: dotnet publish MagicMouseTray/MagicMouseTray.csproj -c Release -o publish
+
+      # Optional Authenticode signing — only runs if the cert secrets are present.
+      - name: Sign (optional)
+        if: ${{ env.SIGN_PFX_BASE64 != '' }}
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+          ./scripts/sign-app.ps1 -Exe publish/MagicMouseTray.exe -PfxPath "$env:RUNNER_TEMP\cert.pfx" -PfxPassword $env:SIGN_PFX_PASSWORD
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" "publish/MagicMouseTray.exe" --generate-notes

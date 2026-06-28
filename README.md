@@ -28,6 +28,16 @@ Apple Magic Mouse on Windows 11 has no native battery indicator. Magic Mouse Uti
 | Magic Mouse v1 (AA battery) | 0x030D | ✅ Confirmed |
 | Magic Mouse v2 | 0x0269 | ⚠ Included, not tested (device not available) |
 
+## Supported Keyboards
+
+Keyboard battery requires a one-time SDP-cache patch (see [Keyboard battery patch](#keyboard-battery-patch)).
+
+| Model | Bluetooth PID | Status |
+|-------|--------------|--------|
+| Apple Wireless Keyboard (2011, A1314) ANSI/ISO/JIS | 0x0239 / 0x023A / 0x023B | ✅ Confirmed |
+| Magic Keyboard (A1644) / ISO | 0x024F / 0x0250 | ⚠ Included, not tested (device not available) |
+| Magic Keyboard with Touch ID (A2449) / ISO | 0x0267 / 0x026C | ⚠ Included, not tested (device not available) |
+
 ## Install
 
 1. Download `MagicMouseTray.exe` from [Releases](../../releases)
@@ -69,14 +79,45 @@ bcdedit /set testsigning off
 ```
 > Note: re-enabling test signing is required if you ever need to reinstall the driver.
 
+### Magic Mouse 2024 (v3) — brief scroll interruption during battery reads
+
+The 2024 Magic Mouse exposes battery only through a unified Feature report that the Apple
+driver blocks (Mode B). To read it, the app momentarily flips the device to the legacy
+split-report mode (Mode A), reads, then flips back. Each scheduled read is **idle-gated** —
+the app waits for the cursor to be idle for ≥30 seconds before flipping — so the brief scroll
+interruption happens during the idle window, not mid-scroll. The exception is the manual
+**Diagnostics → Read Battery Now** (and the per-device matrix "Read Battery Now") action,
+which bypasses the idle wait and can therefore interrupt an active scroll.
+
+## Keyboard battery patch
+
+Apple wireless keyboards declare their battery report as Input-only in the native HID
+descriptor, so Windows cannot read it (the device only pushes on Bluetooth connect). The
+one-time fix patches the Bluetooth SDP cache (`HKLM\...\BTHPORT\Parameters\Devices\<MAC>`)
+to expose the battery report as a readable *Feature* report.
+
+**Fix** (one-time, requires admin):
+
+```powershell
+# Elevated PowerShell:
+.\scripts\kbd-patch-cachedservices.ps1
+```
+
+The script backs up the existing SDP blobs before modifying them. **Re-pairing the keyboard
+erases the patch** — re-run the script if you remove and re-add the keyboard. Until the patch
+is applied, the tray shows **Needs SDP-cache patch** in the keyboard's matrix dropdown, linking
+back to this section.
+
 ## Right-Click Menu
 
 | Item | What it does |
 |------|-------------|
+| Devices → *(per device)* | Each detected device expands to a capability matrix: read method, status, and a context action (e.g. "Read Battery Now" for a v3 in Mode B, "Needs SDP-cache patch" for an unpatched keyboard) |
 | Low Battery Threshold | Set alert level: 10 / 15 / 20 / 25% |
 | Start with Windows | Toggle auto-start on login |
+| Battery Reads [On/Off] | Toggle the v3 Mode-A recycle that reads the 2024 mouse battery |
 | Refresh Now | Force an immediate battery read |
-| Test Notification | Send a test toast (debug) |
+| Diagnostics | Submenu: Read Battery Now, Test Notification (debug toast), Open Logs, Open Diagnostics Folder |
 | ⚠ Install Apple Driver | Opens driver download (shown if driver missing) |
 | ⚠ Driver not bound — scroll fix needed | Opens this README's scroll fix section (driver installed but not bound) |
 | ⚠ Unknown mouse model — check for app update | Opens Releases page (future Apple mouse with unknown PID) |
@@ -114,6 +155,14 @@ Key log lines:
 - `DRIVER_CHECK unknown_apple_pid=0xXXXX` — future/unknown Apple mouse PID detected
 - `TOAST_SENT` — notification fired
 - `CRITICAL_ALERT_SHOWN` — 1% persistent window shown
+
+## Releases & versioning
+
+Releases are built by CI on a `v*` tag (`.github/workflows/release.yml`): the workflow builds,
+runs the unit tests on a `windows-latest` runner, publishes the single-file `win-x64` exe,
+optionally Authenticode-signs it (if cert secrets are configured), and attaches it to a GitHub
+release. The build stamps `FileVersion`/`AssemblyVersion` (currently `1.0.0.0`), visible via the
+exe's Properties → Details tab.
 
 ## License
 
