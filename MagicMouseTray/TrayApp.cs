@@ -297,7 +297,7 @@ internal sealed class TrayApp : IDisposable
                 _deviceBatteries[name] = pct;
 
                 // Per-device alert boundaries
-                if (pct < 0 || pct >= _config.Threshold)
+                if (pct < 0 || pct > _config.Threshold)
                 {
                     _firedBoundaries.Remove(name);
                 }
@@ -312,7 +312,7 @@ internal sealed class TrayApp : IDisposable
 
                     foreach (var boundary in boundaries)
                     {
-                        if (pct < boundary && fired.Add(boundary))
+                        if (pct <= boundary && fired.Add(boundary))
                         {
                             ToastNotifier.Show(pct, name);
                             break;
@@ -321,7 +321,8 @@ internal sealed class TrayApp : IDisposable
                 }
 
                 // Critical alert at 1% — use first device that hits it
-                if (pct == 1 && _criticalAlert == null)
+                const int CriticalPct = 1;
+                if (pct >= 0 && pct <= CriticalPct && _criticalAlert == null)
                 {
                     _criticalAlert = new CriticalAlert(pct, name);
                     _criticalAlert.FormClosed += (_, _) => _criticalAlert = null;
@@ -359,7 +360,7 @@ internal sealed class TrayApp : IDisposable
             if (lowestPct < 0 || kv.Value < lowestPct) { lowestPct = kv.Value; lowestName = kv.Key; }
         }
 
-        bool anyLow = lowestPct >= 0 && lowestPct < _config.Threshold;
+        bool anyLow = lowestPct >= 0 && lowestPct <= _config.Threshold;
 
         var newIcon = MakeIcon(lowestPct, anyLow, MarkerFor(lowestName), _driverStatus != DriverStatus.Ok);
         var oldIcon = _currentIcon;
