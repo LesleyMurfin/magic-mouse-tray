@@ -19,6 +19,7 @@ internal static class Logger
 
     internal static void Log(string message)
     {
+        message = System.Text.RegularExpressions.Regex.Replace(message, @"[^\x00-\x7F]", string.Empty);
         try
         {
             lock (Lock)
@@ -30,7 +31,7 @@ internal static class Logger
                     File.Move(LogPath, LogPath + ".1", overwrite: true);
 
                 File.AppendAllText(LogPath,
-                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
+                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}", new System.Text.UTF8Encoding(true));
             }
         }
         catch { }
