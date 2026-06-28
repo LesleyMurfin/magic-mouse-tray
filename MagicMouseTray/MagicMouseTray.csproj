@@ -20,8 +20,4 @@
     <!-- HID device enumeration and handle management -->
     <PackageReference Include="HidLibrary" Version="3.3.40" />
   </ItemGroup>
-  <ItemGroup>
-    <EmbeddedResource Include="magic-mouse.png" />
-    <EmbeddedResource Include="magic-mouse-black.png" />
-  </ItemGroup>
 </Project>

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
+using Microsoft.Win32;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -37,9 +37,8 @@ internal sealed class TrayApp : IDisposable
 
     Icon? _currentIcon;
 
-    // Cached base image (loaded once from embedded resource)
-    static Bitmap? _mouseOutline;   // magic-mouse.png — white fill, black border
-    static readonly object _bitmapLock = new();
+    // Cached taskbar theme (light/dark); refreshed on system-visual change and at startup.
+    static bool _lightTaskbar;
 
     internal TrayApp(Config config)
     {
@@ -49,7 +48,8 @@ internal sealed class TrayApp : IDisposable
         _driverStatus = DriverHealthChecker.GetStatus();
         var menu = BuildMenu(out _thresholdItems, out _startupItem);
 
-        _currentIcon = MakeIcon(-1, false, _driverStatus != DriverStatus.Ok);
+        RefreshTheme();   // must run before the first MakeIcon
+        _currentIcon = MakeIcon(-1, false, Marker.Mouse, _driverStatus != DriverStatus.Ok);
         _tray = new NotifyIcon
         {
             Icon = _currentIcon,
@@ -57,6 +57,9 @@ internal sealed class TrayApp : IDisposable
             Visible = true,
             Text = "Magic Mouse Battery — starting..."
         };
+
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnSystemVisualChanged;
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged  += OnSystemVisualChanged;
 
         _poller = new AdaptivePoller(_config);
         _poller.BatteryChanged += OnBatteryChanged;
@@ -318,17 +321,26 @@ internal sealed class TrayApp : IDisposable
         });
     }
 
+    // Theme/display change → refresh cached theme and re-render. Marshaled to the
+    // WPF/STA dispatcher like OnBatteryChanged.
+    void OnSystemVisualChanged(object? sender, EventArgs e) =>
+        System.Windows.Application.Current?.Dispatcher.Invoke(() => { RefreshTheme(); UpdateTrayIcon(); });
+
     void UpdateTrayIcon()
     {
-        // Icon driven by the lowest valid battery across all devices
-        int lowestPct = _deviceBatteries.Count == 0
-            ? -1
-            : _deviceBatteries.Values.Aggregate(-1, (acc, p) =>
-                p >= 0 ? (acc < 0 ? p : Math.Min(acc, p)) : acc);
+        // Icon driven by the lowest valid battery across all devices; also capture
+        // that device's name so the icon can show its device-type marker.
+        int lowestPct = -1;
+        string lowestName = string.Empty;
+        foreach (var kv in _deviceBatteries)
+        {
+            if (kv.Value < 0) continue;
+            if (lowestPct < 0 || kv.Value < lowestPct) { lowestPct = kv.Value; lowestName = kv.Key; }
+        }
 
         bool anyLow = lowestPct >= 0 && lowestPct < _config.Threshold;
 
-        var newIcon = MakeIcon(lowestPct, anyLow, _driverStatus != DriverStatus.Ok);
+        var newIcon = MakeIcon(lowestPct, anyLow, MarkerFor(lowestName), _driverStatus != DriverStatus.Ok);
         var oldIcon = _currentIcon;
         _tray.Icon = newIcon;
         _currentIcon = newIcon;
@@ -416,6 +428,8 @@ internal sealed class TrayApp : IDisposable
 
     public void Dispose()
     {
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnSystemVisualChanged;
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged  -= OnSystemVisualChanged;
         _recycleManager.BatteryRead -= OnBatteryChanged;
         _recycleManager.Dispose();
         _poller.BatteryChanged -= OnBatteryChanged;
@@ -427,98 +441,135 @@ internal sealed class TrayApp : IDisposable
     }
 
     // --- Icon generation ---
-    // Loads the Magic Mouse outline PNG from embedded resources and tints it by battery level.
-    // White interior pixels become the tier color; black border pixels stay black.
-    // Falls back to the simple battery-bar if the resource is missing.
+    // Draws a macOS-style battery glyph from scratch (no embedded art): an outlined body
+    // with a terminal nub, a left-anchored fill bar whose width tracks the battery %, and a
+    // device-type marker (mouse/keyboard capsule) in the strip below the body. Colors follow
+    // tier semantics; low/critical states tint the whole glyph for at-a-glance warning.
     //
-    // Tint colors (applied via ColorMatrix — white→color, black stays black):
-    //   disconnected (-1)  → gray
-    //   below threshold    → orange-red
-    //   >50%               → green
-    //   ≥20%               → yellow
-    //   ≥10%               → orange
-    //   <10%               → red
+    // DPI: the process is System-DPI-aware (WPF default, no manifest), so SmallIconSize is
+    // fixed at the DPI present when the process starts. The glyph is rendered crisp at that
+    // launch size; runtime scale changes are bitmap-virtualized by the OS (see spec §0.1).
 
     [DllImport("user32.dll")]
     static extern bool DestroyIcon(IntPtr hIcon);
 
-    static Bitmap? LoadEmbedded(string name)
-    {
-        try
-        {
-            var stream = Assembly.GetExecutingAssembly()
-                .GetManifestResourceStream($"MagicMouseTray.{name}");
-            return stream is null ? null : new Bitmap(stream);
-        }
-        catch { return null; }
-    }
+    // Device-type marker chosen from the display name (the only per-device signal carried in
+    // _deviceBatteries). Every name in KnownKeyboards contains "Keyboard"; no name in
+    // KnownMice does.
+    enum Marker { Mouse, Keyboard }
 
-    static Bitmap? GetOutline()
-    {
-        if (_mouseOutline != null) return _mouseOutline;
-        lock (_bitmapLock)
-        {
-            _mouseOutline ??= LoadEmbedded("magic-mouse.png");
-            return _mouseOutline;
-        }
-    }
+    static Marker MarkerFor(string name) =>
+        name.Contains("Keyboard", StringComparison.OrdinalIgnoreCase) ? Marker.Keyboard : Marker.Mouse;
 
-    static Icon MakeIcon(int pct, bool isLow, bool driverMissing = false)
+    static Icon MakeIcon(int pct, bool isLow, Marker marker, bool driverMissing = false)
     {
-        using var bmp = new Bitmap(16, 16, PixelFormat.Format32bppArgb);
+        int S = SystemInformation.SmallIconSize.Width;     // launch-DPI: 16@100% 20@125% 24@150% 32@200%
+        float k = S / 16f;
+        int R(float v) => (int)Math.Round(v * k, MidpointRounding.AwayFromZero);
+
+        using var bmp = new Bitmap(S, S, PixelFormat.Format32bppArgb);
         using var g = Graphics.FromImage(bmp);
-        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
         g.Clear(Color.Transparent);
+        g.SmoothingMode = SmoothingMode.None;              // crisp integer body fills
 
-        var (r, gv, b) = TintColor(pct, isLow);
-        var baseImg = GetOutline();
+        // Alert states glow the whole glyph (outline + marker + bar) for at-a-glance warning.
+        bool alert = pct >= 0 && (isLow || pct < 10);
+        Color outline = alert ? FillColor(pct, isLow) : ThemeOutlineColor();
 
-        if (baseImg != null)
+        // --- battery body: 4 integer fills + nub (see geometry table) ---
+        int bx = R(1), by = R(3), bw = R(11), bh = R(7);
+        int t  = Math.Max(1, R(1));
+        using (var ob = new SolidBrush(outline))
         {
-            // ColorMatrix: white→tint color, black stays black, alpha preserved
-            using var ia = new ImageAttributes();
-            ia.SetColorMatrix(new ColorMatrix(new float[][]
-            {
-                new float[] { r,   0f,  0f, 0f, 0f },
-                new float[] { 0f, gv,   0f, 0f, 0f },
-                new float[] { 0f,  0f,  b,  0f, 0f },
-                new float[] { 0f,  0f,  0f, 1f, 0f },
-                new float[] { 0f,  0f,  0f, 0f, 1f },
-            }));
-            g.DrawImage(baseImg,
-                new Rectangle(0, 0, 16, 16),
-                0, 0, baseImg.Width, baseImg.Height,
-                GraphicsUnit.Pixel, ia);
-        }
-        else
-        {
-            // Fallback: simple colored rectangle if resource missing
-            using var fb = new SolidBrush(Color.FromArgb(
-                (int)(r * 255), (int)(gv * 255), (int)(b * 255)));
-            g.FillRectangle(fb, 1, 1, 14, 14);
+            g.FillRectangle(ob, bx, by, bw, t);                       // top
+            g.FillRectangle(ob, bx, by + bh - t, bw, t);             // bottom
+            g.FillRectangle(ob, bx, by, t, bh);                      // left
+            g.FillRectangle(ob, bx + bw - t, by, t, bh);            // right
+            g.FillRectangle(ob, bx + bw, by + R(2), R(1.5f), R(3)); // terminal nub
         }
 
-        // Driver-missing badge: 3×3 yellow dot in top-right corner
+        // --- fill bar (tier color; >=1px once any charge exists; none when disconnected) ---
+        if (pct >= 0)
+        {
+            int tx = bx + t, ty = by + t, tw = bw - 2 * t, th = bh - 2 * t;
+            int fw = pct == 0 ? 0 : Math.Min(tw, Math.Max(1, (int)Math.Round(tw * pct / 100.0)));
+            if (fw > 0)
+                using (var fb = new SolidBrush(FillColor(pct, isLow)))
+                    g.FillRectangle(fb, tx, ty, fw, th);
+
+            // --- device marker (bottom strip; never drawn when disconnected) ---
+            // AA only at S>=20: a sub-5px AA capsule at S=16 reads as a smudge, so draw it crisp there.
+            g.SmoothingMode = S >= 20 ? SmoothingMode.AntiAlias : SmoothingMode.None;
+            DrawMarker(g, marker, outline, R);
+            g.SmoothingMode = SmoothingMode.None;
+        }
+
+        // --- driver-missing badge (top-right) ---
         if (driverMissing)
-        {
-            using var dot = new SolidBrush(Color.FromArgb(255, 220, 30));
-            g.FillRectangle(dot, 13, 0, 3, 3);
-        }
+            using (var dot = new SolidBrush(Color.FromArgb(255, 220, 30)))
+                g.FillRectangle(dot, S - R(3), 0, R(3), R(3));
 
         var hIcon = bmp.GetHicon();
         var icon = (Icon)Icon.FromHandle(hIcon).Clone();
-        DestroyIcon(hIcon);
+        DestroyIcon(hIcon);                                // keep existing leak-free tail
         return icon;
     }
 
-    static (float R, float G, float B) TintColor(int pct, bool isLow) => (pct, isLow) switch
+    // isLow (below user threshold) overrides the tier, preserving the old TintColor semantics.
+    static Color FillColor(int pct, bool isLow) => (pct, isLow) switch
     {
-        (-1, _)       => (0.65f, 0.65f, 0.65f),  // gray — disconnected
-        (_, true)     => (1.0f,  0.25f, 0.05f),  // orange-red — below threshold
-        ( > 50, _)    => (0.25f, 1.0f,  0.25f),  // green
-        ( >= 20, _)   => (1.0f,  1.0f,  0.1f),   // yellow
-        ( >= 10, _)   => (1.0f,  0.55f, 0.0f),   // orange
-        _             => (1.0f,  0.15f, 0.15f),  // red — critical
+        (_, true)   => Color.FromArgb(255,  64,  13),  // below user threshold (orange-red)
+        ( > 50, _)  => Color.FromArgb( 52, 199,  89),  // macOS green
+        ( >= 20, _) => Color.FromArgb(255, 204,   0),  // yellow
+        ( >= 10, _) => Color.FromArgb(255, 149,   0),  // orange
+        _           => Color.FromArgb(255,  59,  48),  // macOS red (critical)
     };
+
+    static void DrawMarker(Graphics g, Marker m, Color color, Func<float, int> R)
+    {
+        using var b = new SolidBrush(color);
+        // Both markers sit in the free strip BELOW the body (body fills rows 3..9; strip is rows 10+).
+        var rect = m == Marker.Mouse
+            ? new Rectangle(R(6), R(10), R(4), R(6))   // mouse: vertical capsule (taller than wide)
+            : new Rectangle(R(5), R(11), R(6), R(4));  // keyboard: horizontal capsule (wider than tall)
+        using var path = Capsule(rect);
+        g.FillPath(b, path);
+    }
+
+    // Orientation-aware stadium: separate arc geometry for vertical vs horizontal capsules.
+    static GraphicsPath Capsule(Rectangle r)
+    {
+        var p = new GraphicsPath();
+        if (r.Width <= 1 || r.Height <= 1) { p.AddRectangle(r); return p; }
+        if (r.Height > r.Width)                                   // vertical capsule
+        {
+            int d = r.Width;
+            p.AddArc(r.X, r.Y,          d, d, 180, 180);         // top semicircle
+            p.AddArc(r.X, r.Bottom - d, d, d,   0, 180);         // bottom semicircle
+        }
+        else                                                     // horizontal capsule
+        {
+            int d = r.Height;
+            p.AddArc(r.X,         r.Y, d, d,  90, 180);          // left semicircle
+            p.AddArc(r.Right - d, r.Y, d, d, 270, 180);          // right semicircle
+        }
+        p.CloseFigure();
+        return p;
+    }
+
+    // Cached taskbar theme read (avoids a registry read per render).
+    static void RefreshTheme()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+            _lightTaskbar = (key?.GetValue("SystemUsesLightTheme") as int? ?? 0) == 1;
+        }
+        catch { _lightTaskbar = false; }
+    }
+
+    // Light taskbar => dark outline; dark taskbar => light outline.
+    static Color ThemeOutlineColor() =>
+        _lightTaskbar ? Color.FromArgb(70, 70, 70) : Color.FromArgb(220, 220, 220);
 }
