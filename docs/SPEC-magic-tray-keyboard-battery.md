@@ -114,7 +114,7 @@ Sentinels (keep existing convention): `-1` = device not found, `-2` = present bu
 
 ## Open Questions
 
-1. **Canonical working copy** — three `magic-mouse-tray` checkouts exist (`projects/apple-peripherals`, `projects/revivelabs`, `orca/workspaces`). Which is the source of truth for implementation + the GitHub repo to publish?
+1. **Canonical working copy** — three `magic-mouse-tray` checkouts exist (`projects/apple-peripherals`, `projects/Revive_Labs`, `orca/workspaces`). Which is the source of truth for implementation + the GitHub repo to publish?
 2. **Keyboard model scope** — battery read is verified only for A1314 (0x0239). Ship keyboard battery for the verified model only, or attempt the other `KnownKeyboards` (Magic Keyboard A1644 / Touch ID) untested?
 3. **MAC discovery** — patch script defaults to the hardcoded MAC `e806884b0741`. Production must discover the paired keyboard's MAC dynamically; confirm the discovery source (BTHENUM instance path parse).
 4. **Distribution/signing** — GitHub Releases Win32 installer assumed (MS Store ruled out by `HKLM\SYSTEM` writes). Code-signing cert: reuse `CN=MagicMouseFix`, or acquire a real OV/EV cert to reduce SmartScreen/AV friction (safety Finding 8)?
