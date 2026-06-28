@@ -23,6 +23,8 @@ public partial class App
             return;                      // second instance exits silently
         }
 
+        Logger.LogAppStart();
+
         System.AppDomain.CurrentDomain.UnhandledException += (s, ev) =>
         {
             if (ev.ExceptionObject is System.Exception ex)
