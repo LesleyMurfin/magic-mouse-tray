@@ -12,7 +12,7 @@ Apple Magic Mouse on Windows 11 has no native battery indicator. Magic Mouse Uti
 
 - Battery % in tray icon (color-coded: green → yellow → orange → red as battery drains)
 - Tooltip shows device name, battery %, and time until next poll
-- Adaptive polling: checks every 2h at >50%, tightening to 5m below 10%
+- Adaptive polling: checks every 24h above 20%; tightens to rate-based below 20% (floor: 5 min for Magic Mouse 2024, 30 min for other devices)
 - Low battery toast notification at your configured threshold (10/15/20/25%)
 - Cascading alerts: second toast fires automatically at 10% critical if your threshold is higher
 - Persistent warning window at 1% that stays visible until you plug in the Lightning cable
