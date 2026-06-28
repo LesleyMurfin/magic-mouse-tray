@@ -35,6 +35,18 @@ internal static class DriverHealthChecker
     // If Apple ships a new model, its PID won't be here — we surface that as UnknownAppleMouse.
     static readonly string[] KnownPids = ["030d", "0310", "0269", "0323"];
 
+    // Apple BT-HID devices matched by the same VID/UUID scan but that do NOT use the
+    // applewirelessmouse scroll filter (trackpads + keyboards). Excluded from BOTH the
+    // UnknownAppleMouse and the NotBound verdicts — otherwise the tray shows a false warning.
+    // PIDs are numeric facts only (hid-ids.h, GPL) — no kernel code/comments copied.
+    static readonly string[] NonScrollApplePids =
+    [
+        "030e", "0265", "0324",                                       // trackpads (v1, v2, v3)
+        "0239", "023a", "023b", "024f", "0250", "0267", "026c",       // existing keyboard rows (latent fix)
+        "029c", "029a", "029f", "0320", "0321", "0322",               // Magic Keyboards 2021/2024
+        "0255", "0256", "0257",                                       // Apple Wireless Keyboard 2011 (true)
+    ];
+
     internal static DriverStatus GetStatus()
     {
         try
@@ -72,6 +84,14 @@ internal static class DriverHealthChecker
                 int pidIdx = subkeyName.LastIndexOf("_PID&", StringComparison.OrdinalIgnoreCase);
                 if (pidIdx < 0 || pidIdx + 9 > subkeyName.Length) continue;
                 var pid = subkeyName.Substring(pidIdx + 5, 4).ToLowerInvariant();
+
+                // Non-scroll Apple device (trackpad/keyboard): no scroll filter expected.
+                // Skip so it triggers neither UnknownAppleMouse nor NotBound.
+                if (Array.Exists(NonScrollApplePids, p => p == pid))
+                {
+                    Logger.Log($"DRIVER_CHECK skip_non_scroll_apple pid=0x{pid.ToUpper()}");
+                    continue;
+                }
 
                 using var deviceKey = btEnumKey.OpenSubKey(subkeyName, writable: false);
                 if (deviceKey == null) continue;

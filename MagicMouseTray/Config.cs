@@ -19,6 +19,7 @@ internal sealed class Config
     internal int Threshold { get; private set; } = 20;
     internal bool StartWithWindows { get; private set; }
     internal bool EnableV3Recycle { get; private set; } = true;
+    internal bool EnableThirdParty { get; private set; } = false;
 
     internal static Config Load()
     {
@@ -38,6 +39,8 @@ internal sealed class Config
                 cfg.StartWithWindows = s;
             else if (key == "enable_v3_recycle" && bool.TryParse(val, out bool r))
                 cfg.EnableV3Recycle = r;
+            else if (key == "enable_third_party" && bool.TryParse(val, out bool tp))
+                cfg.EnableThirdParty = tp;
         }
         return cfg;
     }
@@ -65,6 +68,13 @@ internal sealed class Config
         Logger.Log($"CONFIG enable_v3_recycle={value}");
     }
 
+    internal void SetEnableThirdParty(bool value)
+    {
+        EnableThirdParty = value;
+        Persist();
+        Logger.Log($"CONFIG enable_third_party={value}");
+    }
+
     static bool IsValid(int t) => t is 10 or 15 or 20 or 25;
 
     void Persist()
@@ -75,7 +85,8 @@ internal sealed class Config
             File.WriteAllLines(ConfigPath, [
                 $"threshold={Threshold}",
                 $"start_with_windows={StartWithWindows.ToString().ToLower()}",
-                $"enable_v3_recycle={EnableV3Recycle.ToString().ToLower()}"
+                $"enable_v3_recycle={EnableV3Recycle.ToString().ToLower()}",
+                $"enable_third_party={EnableThirdParty.ToString().ToLower()}"
             ]);
         }
         catch { }

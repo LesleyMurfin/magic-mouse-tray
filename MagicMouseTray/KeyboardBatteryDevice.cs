@@ -40,6 +40,23 @@ internal sealed class KeyboardBatteryDevice : IBatteryDevice
         // Magic Keyboard with Touch ID (A2449, 2021+)
         new("000205AC", "PID&0267", "Magic Keyboard with Touch ID"),
         new("000205AC", "PID&026C", "Magic Keyboard with Touch ID ISO"),
+        // PIDs below: numeric facts only from hid-ids.h (GPL) — no kernel code/comments copied.
+        // Magic Keyboard 2021/2024 (BLE company-id 0x004C or BT-classic 0x05AC)
+        new("0001004C", "PID&029C", "Magic Keyboard (2021)"),
+        new("000205AC", "PID&029C", "Magic Keyboard (2021)"),
+        new("0001004C", "PID&029A", "Magic Keyboard with Touch ID (2021)"),
+        new("000205AC", "PID&029A", "Magic Keyboard with Touch ID (2021)"),
+        new("0001004C", "PID&029F", "Magic Keyboard with Numeric Keypad (2021)"),
+        new("000205AC", "PID&029F", "Magic Keyboard with Numeric Keypad (2021)"),
+        new("0001004C", "PID&0320", "Magic Keyboard (2024)"),
+        new("000205AC", "PID&0320", "Magic Keyboard (2024)"),
+        new("0001004C", "PID&0321", "Magic Keyboard with Touch ID (2024)"),
+        new("000205AC", "PID&0321", "Magic Keyboard with Touch ID (2024)"),
+        new("0001004C", "PID&0322", "Magic Keyboard with Numeric Keypad (2024)"),
+        new("000205AC", "PID&0322", "Magic Keyboard with Numeric Keypad (2024)"),
+        new("000205AC", "PID&0255", "Apple Wireless Keyboard (2011 ANSI)"),
+        new("000205AC", "PID&0256", "Apple Wireless Keyboard (2011 ISO)"),
+        new("000205AC", "PID&0257", "Apple Wireless Keyboard (2011 JIS)"),
     ];
 
     // Battery Strength on Generic Device Controls page — readable as a Feature after the patch.
