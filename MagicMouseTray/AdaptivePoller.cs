@@ -14,7 +14,7 @@ internal sealed class AdaptivePoller : IDisposable
 {
     // Fired once per discovered device per poll cycle.
     // percent sentinel values: -1=not found/disconnected, -2=present but unreadable (Mode B).
-    internal event Action<int, string>? BatteryChanged;
+    internal event Action<int, string, DeviceKind>? BatteryChanged;
 
     // Last computed interval — readable by TrayApp for tooltip.
     internal TimeSpan LastInterval { get; private set; } = TimeSpan.FromMinutes(5);
@@ -116,7 +116,7 @@ internal sealed class AdaptivePoller : IDisposable
                             if (ReadingRank(pct) > ReadingRank(best)) best = pct;
                         }
 
-                        BatteryChanged?.Invoke(best, group.Key);
+                        BatteryChanged?.Invoke(best, group.Key, group.First().Kind);
 
                         if (best >= 0)
                         {

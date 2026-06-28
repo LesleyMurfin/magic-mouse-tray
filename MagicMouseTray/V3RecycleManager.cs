@@ -38,7 +38,7 @@ namespace MagicMouseTray;
 
 internal sealed class V3RecycleManager : IDisposable
 {
-    internal event Action<int, string>? BatteryRead;
+    internal event Action<int, string, DeviceKind>? BatteryRead;
 
     const int IdleThresholdMs    = 30_000; // 30s
     const int RetryDelayMs       = 500;
@@ -249,7 +249,7 @@ internal sealed class V3RecycleManager : IDisposable
                 _lastKnownDevice = deviceName;
                 _consecutiveFailures = 0;
                 DrainRateTracker.Record(deviceName, pct);
-                BatteryRead?.Invoke(pct, deviceName);
+                BatteryRead?.Invoke(pct, deviceName, DeviceKind.MagicMouseV3);
                 Logger.Log($"V3RECYCLE cycle SUCCESS pct={pct} rate={DrainRateTracker.GetDrainRatePctPerHour(deviceName):F3}%/h hoursLeft={DrainRateTracker.GetHoursToThreshold(deviceName, pct, _config.Threshold):F1}");
                 return;
             }

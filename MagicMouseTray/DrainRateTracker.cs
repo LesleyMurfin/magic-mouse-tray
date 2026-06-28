@@ -75,7 +75,7 @@ internal static class DrainRateTracker
         var floor = isV3 ? FloorV3 : FloorNonV3;
 
         if (pct < 0) return floor;          // disconnected — poll at floor rate
-        if (pct >= 20) return CeilingNormal; // healthy — once a day
+        if (pct >= threshold) return CeilingNormal; // healthy — once a day
 
         TimeSpan interval;
         var rate = GetDrainRatePctPerHour(device);
@@ -88,8 +88,8 @@ internal static class DrainRateTracker
         }
         else
         {
-            // No rate data — exponential formula anchored at 20%=3h
-            var hours = 3.0 * Math.Pow(2.0, (pct - 20.0) / 10.0);
+            // No rate data — exponential formula anchored at threshold=3h
+            var hours = 3.0 * Math.Pow(2.0, (pct - (double)threshold) / 10.0);
             interval = TimeSpan.FromHours(hours);
         }
 

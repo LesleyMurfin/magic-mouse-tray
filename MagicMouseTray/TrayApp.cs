@@ -20,7 +20,7 @@ internal sealed class TrayApp : IDisposable
 
     // Per-device battery state, keyed by device name. Updated per poll event.
     // Cleared when no devices are detected (empty name from AdaptivePoller).
-    readonly Dictionary<string, int> _deviceBatteries = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, (int Pct, DeviceKind Kind)> _deviceBatteries = new(StringComparer.OrdinalIgnoreCase);
 
     // Per-device menu items for live battery display in the right-click menu.
     readonly Dictionary<string, ToolStripMenuItem> _deviceMenuItems = new(StringComparer.OrdinalIgnoreCase);
@@ -170,7 +170,7 @@ internal sealed class TrayApp : IDisposable
         menu.Items.Add(thirdPartyItem);
 
         // --- Refresh Now ---
-        var refresh = new ToolStripMenuItem("Refresh Now");
+        var refresh = new ToolStripMenuItem("Refresh Now (All Devices)");
         refresh.Click += (_, _) => _poller.RefreshNow();
         menu.Items.Add(refresh);
 
@@ -178,15 +178,15 @@ internal sealed class TrayApp : IDisposable
         //     surfaced contextually in the per-device matrix dropdown. ---
         var diagnostics = new ToolStripMenuItem("Diagnostics");
 
-        var readNow = new ToolStripMenuItem("Read Battery Now");
+        var readNow = new ToolStripMenuItem("Read Battery Now (V3 Flip)");
         readNow.Click += (_, _) => _ = _recycleManager.ForceReadNowAsync();
         diagnostics.DropDownItems.Add(readNow);
 
         var testToast = new ToolStripMenuItem("Test Notification");
         testToast.Click += (_, _) =>
         {
-            var (name, pct) = _deviceBatteries.FirstOrDefault(kv => kv.Value >= 0);
-            ToastNotifier.Show(pct >= 0 ? pct : 15, name?.Length > 0 ? name : "Magic Mouse");
+            var (name, batt) = _deviceBatteries.FirstOrDefault(kv => kv.Value.Pct >= 0);
+            ToastNotifier.Show(batt.Pct >= 0 ? batt.Pct : 15, name?.Length > 0 ? name : "Magic Mouse");
         };
         diagnostics.DropDownItems.Add(testToast);
 
@@ -281,7 +281,7 @@ internal sealed class TrayApp : IDisposable
         return null;
     }
 
-    void OnBatteryChanged(int pct, string name)
+    void OnBatteryChanged(int pct, string name, DeviceKind kind)
     {
         // Marshal to WPF/STA thread — NotifyIcon was created there
         System.Windows.Application.Current.Dispatcher.Invoke(() =>
@@ -294,10 +294,10 @@ internal sealed class TrayApp : IDisposable
             }
             else
             {
-                _deviceBatteries[name] = pct;
+                _deviceBatteries[name] = (pct, kind);
 
                 // Per-device alert boundaries
-                if (pct < 0 || pct >= _config.Threshold)
+                if (pct < 0 || pct > _config.Threshold)
                 {
                     _firedBoundaries.Remove(name);
                 }
@@ -312,7 +312,7 @@ internal sealed class TrayApp : IDisposable
 
                     foreach (var boundary in boundaries)
                     {
-                        if (pct < boundary && fired.Add(boundary))
+                        if (pct <= boundary && fired.Add(boundary))
                         {
                             ToastNotifier.Show(pct, name);
                             break;
@@ -321,7 +321,8 @@ internal sealed class TrayApp : IDisposable
                 }
 
                 // Critical alert at 1% — use first device that hits it
-                if (pct == 1 && _criticalAlert == null)
+                const int CriticalPct = 1;
+                if (pct >= 0 && pct <= CriticalPct && _criticalAlert == null)
                 {
                     _criticalAlert = new CriticalAlert(pct, name);
                     _criticalAlert.FormClosed += (_, _) => _criticalAlert = null;
@@ -332,7 +333,7 @@ internal sealed class TrayApp : IDisposable
 
             // Close critical alert when all devices are gone or the alerting device reconnects
             if (_criticalAlert != null && (_deviceBatteries.Count == 0 ||
-                _deviceBatteries.Values.All(p => p < 0)))
+                _deviceBatteries.Values.All(p => p.Pct < 0)))
             {
                 _criticalAlert.Close();
                 Logger.Log("CRITICAL_ALERT_CLOSED reason=no_devices");
@@ -355,11 +356,11 @@ internal sealed class TrayApp : IDisposable
         string lowestName = string.Empty;
         foreach (var kv in _deviceBatteries)
         {
-            if (kv.Value < 0) continue;
-            if (lowestPct < 0 || kv.Value < lowestPct) { lowestPct = kv.Value; lowestName = kv.Key; }
+            if (kv.Value.Pct < 0) continue; // Note: kv.Value is now a tuple (int Pct, DeviceKind Kind)
+            if (lowestPct < 0 || kv.Value.Pct < lowestPct) { lowestPct = kv.Value.Pct; lowestName = kv.Key; }
         }
 
-        bool anyLow = lowestPct >= 0 && lowestPct < _config.Threshold;
+        bool anyLow = lowestPct >= 0 && lowestPct <= _config.Threshold;
 
         var newIcon = MakeIcon(lowestPct, anyLow, MarkerFor(lowestName), _driverStatus != DriverStatus.Ok);
         var oldIcon = _currentIcon;
@@ -377,17 +378,26 @@ internal sealed class TrayApp : IDisposable
         {
             var parts = _deviceBatteries.Select(kv =>
             {
-                var pctStr = kv.Value switch {
-                    >= 0 => $"{kv.Value}%",
+                var pct = kv.Value.Pct;
+                var kind = kv.Value.Kind;
+                var pctStr = pct switch {
+                    >= 0 => $"{pct}%",
                     -2   => "N/A",
                     _    => "—",
                 };
-                return $"{kv.Key}: {pctStr}";
+                var nameStr = pct == -2 && kind == DeviceKind.MagicKeyboard ? "Keyboard (needs patch)" : kv.Key;
+                var estDaysStr = "";
+                if (pct >= 0)
+                {
+                    var hoursLeft = DrainRateTracker.GetHoursToThreshold(kv.Key, pct, 0); // hours to 0%
+                    if (hoursLeft > 24) estDaysStr = $" (~{(hoursLeft/24.0):F1}d est.)";
+                }
+                return $"{nameStr}: {pctStr}{estDaysStr}";
             });
             var joined = string.Join(" | ", parts);
             // Show V3RecycleManager interval if v3 has a valid reading; otherwise AdaptivePoller
             var hasV3Reading = _deviceBatteries.Any(kv =>
-                kv.Key.Contains("2024", StringComparison.OrdinalIgnoreCase) && kv.Value >= 0);
+                kv.Key.Contains("2024", StringComparison.OrdinalIgnoreCase) && kv.Value.Pct >= 0);
             var interval = hasV3Reading ? _recycleManager.NextInterval : _poller.LastInterval;
             tip = $"{joined} · {FormatInterval(interval)}";
             if (_driverStatus != DriverStatus.Ok) tip = $"⚠ {tip}";
@@ -424,19 +434,46 @@ internal sealed class TrayApp : IDisposable
 
         foreach (var kv in _deviceBatteries)
         {
-            var pctStr = kv.Value switch {
-                >= 0 => $"{kv.Value}%",
+            var pct = kv.Value.Pct;
+            var kind = kv.Value.Kind;
+            var pctStr = pct switch {
+                >= 0 => $"{pct}%",
                 -2   => "N/A (Mode B)",
                 _    => "—"
             };
 
             var rate = DrainRateTracker.GetDrainRatePctPerHour(kv.Key);
             var rateStr = rate > 0.001 ? $"  {rate:F2}%/h" : string.Empty;
-            var label = $"{kv.Key}: {pctStr}{rateStr}";
+            
+            var estDaysStr = string.Empty;
+            if (pct >= 0)
+            {
+                var hoursLeft = DrainRateTracker.GetHoursToThreshold(kv.Key, pct, 0);
+                if (hoursLeft > 24)
+                {
+                    estDaysStr = $"  ~{(hoursLeft/24.0):F1} days est.";
+                }
+            }
+
+            var label = $"{kv.Key}: {pctStr}{rateStr}{estDaysStr}";
+
+            // TODO(human): Trackpad hardware verification
+
+            var isPatchNeeded = pct == -2 && kind == DeviceKind.MagicKeyboard;
+            if (isPatchNeeded)
+            {
+                label = "Keyboard battery unavailable — descriptor patch required";
+            }
 
             if (!_deviceMenuItems.TryGetValue(kv.Key, out var item))
             {
-                item = new ToolStripMenuItem(label);   // enabled — carries the matrix dropdown
+                item = new ToolStripMenuItem(label) { Enabled = !isPatchNeeded };
+                if (isPatchNeeded)
+                {
+                    item.Enabled = true;
+                    item.ForeColor = System.Drawing.Color.OrangeRed;
+                    item.Click += (_, _) => System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("https://github.com/ReviveBusiness/magic-mouse-tray#keyboard-descriptor-patch") { UseShellExecute = true });
+                }
                 _deviceMenuItems[kv.Key] = item;
                 // Insert before the separator that follows the device section
                 var sepIdx = _tray.ContextMenuStrip!.Items.IndexOf(_deviceSection) + 1;
@@ -445,6 +482,12 @@ internal sealed class TrayApp : IDisposable
             else
             {
                 item.Text = label;
+                if (isPatchNeeded && item.ForeColor != System.Drawing.Color.OrangeRed)
+                {
+                    item.Enabled = true;
+                    item.ForeColor = System.Drawing.Color.OrangeRed;
+                    item.Click += (_, _) => System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("https://github.com/ReviveBusiness/magic-mouse-tray#keyboard-descriptor-patch") { UseShellExecute = true });
+                }
             }
 
             // Capability matrix dropdown for this device.

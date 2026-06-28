@@ -21,12 +21,20 @@ internal static class ToastNotifier
         {
             EnsureAumid();
 
+            string title = "Magic Mouse Battery Low";
+            if (deviceName.IndexOf("Keyboard", StringComparison.OrdinalIgnoreCase) >= 0)
+                title = "Magic Keyboard Battery Low";
+            else if (deviceName.IndexOf("Trackpad", StringComparison.OrdinalIgnoreCase) >= 0)
+                title = "Magic Trackpad Battery Low";
+
+            var escapedName = System.Security.SecurityElement.Escape(deviceName) ?? deviceName;
+
             var doc = new XmlDocument();
             doc.LoadXml($"""
                 <toast>
                     <visual><binding template="ToastGeneric">
-                        <text>Magic Mouse Battery Low</text>
-                        <text>{deviceName} is at {pct}% — {(pct <= 10 ? "charge now!" : "charge soon")}</text>
+                        <text>{title}</text>
+                        <text>{escapedName} is at {pct}% — {(pct <= 10 ? "charge now!" : "charge soon")}</text>
                     </binding></visual>
                 </toast>
                 """);

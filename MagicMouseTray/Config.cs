@@ -26,21 +26,28 @@ internal sealed class Config
         var cfg = new Config();
         if (!File.Exists(ConfigPath)) return cfg;
 
-        foreach (var line in File.ReadAllLines(ConfigPath))
+        try
         {
-            var eq = line.IndexOf('=');
-            if (eq < 0) continue;
-            var key = line[..eq].Trim();
-            var val = line[(eq + 1)..].Trim();
+            foreach (var line in File.ReadAllLines(ConfigPath))
+            {
+                var eq = line.IndexOf('=');
+                if (eq < 0) continue;
+                var key = line[..eq].Trim();
+                var val = line[(eq + 1)..].Trim();
 
-            if (key == "threshold" && int.TryParse(val, out int t) && IsValid(t))
-                cfg.Threshold = t;
-            else if (key == "start_with_windows" && bool.TryParse(val, out bool s))
-                cfg.StartWithWindows = s;
-            else if (key == "enable_v3_recycle" && bool.TryParse(val, out bool r))
-                cfg.EnableV3Recycle = r;
-            else if (key == "enable_third_party" && bool.TryParse(val, out bool tp))
-                cfg.EnableThirdParty = tp;
+                if (key == "threshold" && int.TryParse(val, out int t) && IsValid(t))
+                    cfg.Threshold = t;
+                else if (key == "start_with_windows" && bool.TryParse(val, out bool s))
+                    cfg.StartWithWindows = s;
+                else if (key == "enable_v3_recycle" && bool.TryParse(val, out bool r))
+                    cfg.EnableV3Recycle = r;
+                else if (key == "enable_third_party" && bool.TryParse(val, out bool tp))
+                    cfg.EnableThirdParty = tp;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"CONFIG_LOAD_FAILED err=\"{ex.Message}\"");
         }
         return cfg;
     }
